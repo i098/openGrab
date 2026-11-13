@@ -192,6 +192,11 @@ async fn main() -> Result<()> {
         write_summary(&out, &results)?;
         bail!("not in the call");
     };
+    let chat_open = if want("chat") {
+        bot.open_chat().await
+    } else {
+        Ok(())
+    };
 
     drain(&mut bot, Duration::from_secs(5), &mut col).await;
     bot.screenshot(&out.join("in-call.png")).await?;
@@ -252,7 +257,15 @@ async fn main() -> Result<()> {
         }
     }
 
-    if want("chat") {
+    if let Err(e) = &chat_open {
+        verdict(
+            false,
+            "chat",
+            format!("the chat panel did not open: {e:#}"),
+            &mut results,
+        );
+    }
+    if want("chat") && chat_open.is_ok() {
         println!(
             "chat: waiting for the host to post {} messages",
             a.chat_count

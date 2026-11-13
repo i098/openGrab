@@ -98,8 +98,23 @@ impl Session {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let ws_url = format!("ws://{}/{token}", listener.local_addr()?);
         let (tx, events) = mpsc::unbounded_channel();
-        let tasks = vec![tokio::spawn(serve(listener, token, tx))];
+        let task = tokio::spawn(serve(listener, token, tx));
+        let abort = task.abort_handle();
+        let profile = opts.profile.clone();
+        let started = Self::start(opts, ws_url, events, vec![task]).await;
+        if started.is_err() {
+            abort.abort();
+            let _ = std::fs::remove_dir_all(profile);
+        }
+        started
+    }
 
+    async fn start(
+        opts: Opts,
+        ws_url: String,
+        events: mpsc::UnboundedReceiver<CallEvent>,
+        tasks: Vec<JoinHandle<()>>,
+    ) -> Result<Self> {
         let mut args = vec![
             "--use-fake-ui-for-media-stream".to_string(),
             "--use-fake-device-for-media-stream".to_string(),
@@ -113,7 +128,7 @@ impl Session {
                 audio.display()
             ));
         }
-        // Mode 700 and deleted in `leave`: the profile holds the browser's cookies.
+        // Mode 700 and deleted when the session drops: the profile holds the browser's cookies.
         std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
             .create(&opts.profile)?;
         let port = free_port()?;
@@ -177,7 +192,6 @@ impl Session {
         .await;
         if let Err(e) = headed {
             let _ = child.kill().await;
-            let _ = std::fs::remove_dir_all(&opts.profile);
             return Err(e);
         }
         let cfg_js = serde_json::json!({
@@ -347,13 +361,19 @@ impl Session {
         self.set_media(on, cam).await
     }
 
+    /// Open the chat panel with a trusted click and give the page script one scan to prime.
+    pub async fn open_chat(&self) -> Result<()> {
+        if !self.eval::<bool>("__parley.chatOpen()").await? {
+            self.click("chatToggle").await?;
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
+        Ok(())
+    }
+
     /// Post one chat line. True once the line shows in Meet's message list.
     pub async fn post_chat(&self, text: &str) -> Result<bool> {
         let js_text = serde_json::to_string(text)?;
-        if !self.eval::<bool>("__parley.chatOpen()").await? {
-            self.click("chatToggle").await?;
-            tokio::time::sleep(Duration::from_millis(800)).await;
-        }
+        self.open_chat().await?;
         let before: u32 = self.eval(&format!("__parley.chatCount({js_text})")).await?;
         self.eval::<serde_json::Value>(&format!("__parley.rememberSent({js_text})"))
             .await?;
@@ -422,11 +442,23 @@ impl Session {
         let _ = self.click("leave").await;
         let _ = self.cdp.call(None, "Browser.close", json!({})).await;
         let _ = self.child.wait().await;
+        Ok(())
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+        for _ in 0..40 {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         for t in &self.tasks {
             t.abort();
         }
         let _ = std::fs::remove_dir_all(&self.opts.profile);
-        Ok(())
     }
 }
 
