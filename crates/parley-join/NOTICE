@@ -1,0 +1,19 @@
+parley-join
+
+Parts of page/inject.js and page/selectors.json are ported from Vexa-ai/vexa
+(https://github.com/Vexa-ai/vexa), Copyright 2025-2026 Vexa.ai Inc. and the Vexa
+contributors, licensed under the Apache License, Version 2.0.
+
+Ported (from core/meetings/modules in the Vexa repository):
+  join/src/googlemeet/selectors.ts, admission.ts, refusal.ts, join.ts
+      lobby selectors, waiting / denied / refused / expired page texts, join-button lookup
+  gmeet-capture/src/gmeet-chat.ts      chat panel toggle, message list, sender and composer lookup
+  gmeet-capture/src/gmeet-speakers.ts  participant tile, name and speaking-class reading
+  gmeet-capture/src/pcm-capture.ts     AudioWorklet 16 kHz PCM capture
+  mixed-capture-core/src/webrtc-audio-hook.ts  RTCPeerConnection remote-audio hook
+
+Changed: rewritten in plain JavaScript as one thin script, driven from Rust; selectors and page
+strings moved into one JSON file; PCM frames go to a local WebSocket as 100 ms binary frames.
+
+Not ported on purpose: Vexa's humanized pointer input and its flag that hides browser automation.
+The driver uses plain CDP input in a plain Chromium and does not hide that it is automated.

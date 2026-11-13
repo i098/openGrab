@@ -1,0 +1,15 @@
+[package]
+name = "parley-join"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Rust-driven Chromium bot that joins a Google Meet call (Phase 0 spike)"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.30"

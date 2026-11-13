@@ -27,7 +27,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # rust-cache prunes target/sherpa-onnx-prebuilt but keeps sherpa-onnx-sys's
+      # build-script output, so cargo skips the download and links a missing dir.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
 
       - name: Format
         run: cargo fmt --all --check
