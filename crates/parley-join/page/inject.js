@@ -62,7 +62,6 @@
   canvas.height = 360;
   const g = canvas.getContext("2d");
   let tileState = "listening";
-  let tick = 0;
   const draw = () => {
     g.fillStyle = tileState === "paused" ? "#3b2f12" : "#10261c";
     g.fillRect(0, 0, 640, 360);
@@ -72,8 +71,6 @@
     g.fillText(tileState, 320, 190);
     g.font = "28px sans-serif";
     g.fillText(CFG.name, 320, 260);
-    g.fillStyle = tick++ % 2 ? "#ffffff" : "#888888"; // keeps frames flowing
-    g.fillRect(8, 8, 8, 8);
   };
   draw();
   setInterval(draw, 500);

@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 struct Args {
     /// The Meet link. The host must admit every guest that asks to join.
     link: String,
-    /// Where logs, screenshots, audio and JSON go (default: ./p0-out/<epoch>).
+    /// Where logs, screenshots, audio and JSON go (default: <temp dir>/parley-p0-out/<epoch>).
     #[arg(long)]
     out: Option<PathBuf>,
     /// Pinned Chromium binary (default: the newest under ~/.local/share/opengrab/chromium).
@@ -133,7 +133,7 @@ async fn main() -> Result<()> {
     let out = a
         .out
         .clone()
-        .unwrap_or_else(|| PathBuf::from(format!("p0-out/{}", now_ms() / 1000)));
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("parley-p0-out/{}", now_ms() / 1000)));
     std::fs::create_dir_all(&out)?;
     let chrome = a.chrome.clone().map_or_else(find_chrome, Ok)?;
     let mut results = Vec::new();
