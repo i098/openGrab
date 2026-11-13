@@ -26,8 +26,15 @@ struct Args {
     /// Join attempts. The last one stays in the call for the other checks.
     #[arg(long, default_value_t = 1)]
     joins: u32,
+    /// Seconds to wait between join attempts.
+    #[arg(long, default_value_t = 0)]
+    join_gap: u64,
     #[arg(long, default_value_t = 300)]
     join_timeout: u64,
+    /// JSON cookie file (CDP `Storage.getCookies` format) of the account to sign in as. Without it every profile joins as a guest.
+    /// Every profile, speakers included, loads it. Keep the file outside the repo, mode 600.
+    #[arg(long, env = "PARLEY_COOKIES")]
+    cookies: Option<PathBuf>,
     #[arg(long, default_value_t = 10)]
     chat_count: u32,
     #[arg(long, default_value_t = 600)]
@@ -114,15 +121,25 @@ fn find_chrome() -> Result<PathBuf> {
         .join("chrome-linux64/chrome"))
 }
 
-/// Profiles live in the temp dir (tmpfs on this host): on a slow disk Chromium stalls page loads past CDP timeouts.
-fn launch_opts(chrome: &Path, tag: &str, name: &str, role: Role) -> Opts {
+/// Profiles live on tmpfs: on a slow disk Chromium stalls page loads and cookie writes past CDP timeouts,
+/// and a cookie write is how a signed-in profile is loaded.
+fn profile_root() -> PathBuf {
+    let shm = PathBuf::from("/dev/shm");
+    let base = if shm.is_dir() {
+        shm
+    } else {
+        std::env::temp_dir()
+    };
+    base.join(format!("parley-p0-{}", std::process::id()))
+}
+
+fn launch_opts(a: &Args, chrome: &Path, tag: &str, name: &str, role: Role) -> Opts {
     Opts {
         chrome: chrome.into(),
-        profile: std::env::temp_dir()
-            .join(format!("parley-p0-{}", std::process::id()))
-            .join(tag),
+        profile: profile_root().join(tag),
         name: name.into(),
         role,
+        cookies: a.cookies.clone(),
     }
 }
 
@@ -144,7 +161,11 @@ async fn main() -> Result<()> {
     let mut bot: Option<Session> = None;
     let mut joins_log = String::new();
     for i in 1..=a.joins {
+        if i > 1 {
+            tokio::time::sleep(Duration::from_secs(a.join_gap)).await;
+        }
         let mut s = Session::launch(launch_opts(
+            &a,
             &chrome,
             &format!("bot-{i}"),
             &a.name,
@@ -181,7 +202,7 @@ async fn main() -> Result<()> {
             admitted * 10 >= a.joins * 9 && admitted > 0,
             "join",
             format!(
-                "{admitted} of {} guest joins reached the call (go limit: 9 of 10)",
+                "{admitted} of {} joins reached the call (go limit: 9 of 10)",
                 a.joins
             ),
             &mut results,
@@ -231,7 +252,7 @@ async fn main() -> Result<()> {
         std::fs::write(
             &file,
             serde_json::to_string_pretty(
-                &serde_json::json!({"bot_kind": "guest", "snapshots": snaps}),
+                &serde_json::json!({"bot_kind": if a.cookies.is_some() { "signed_in" } else { "guest" }, "snapshots": snaps}),
             )?,
         )?;
         verdict(
@@ -340,6 +361,7 @@ async fn speakers(
             .context("speaker wav missing")?;
         s.push(
             Session::launch(launch_opts(
+                a,
                 chrome,
                 &format!("speaker-{i}"),
                 n,

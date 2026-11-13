@@ -2,7 +2,7 @@
 //!
 //! The driver starts a pinned, non-headless Chromium (run it inside Xvfb, R1), injects
 //! `page/inject.js` before the page loads, and talks to it over a local WebSocket (audio, chat,
-//! roster) and CDP (clicks, text input, commands). It signs in to nothing: guest join only.
+//! roster) and CDP (clicks, text input, commands). It joins as a guest, or signed in when `Opts::cookies` holds a session.
 
 pub mod analysis;
 pub mod cdp;
@@ -41,6 +41,9 @@ pub struct Opts {
     pub profile: PathBuf,
     pub name: String,
     pub role: Role,
+    /// A JSON array of CDP cookies (as `Storage.getCookies` returns them) of the account the bot signs in as.
+    /// `None` means a guest join. The file stays outside the repo; the driver never logs a value.
+    pub cookies: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -164,6 +167,15 @@ impl Session {
             .as_str()
             .context("no session id for the tab")?
             .to_string();
+        if let Some(file) = &opts.cookies {
+            let cookies = load_cookies(file)?;
+            cdp.call(
+                Some(&tab),
+                "Network.setCookies",
+                json!({ "cookies": cookies }),
+            )
+            .await?;
+        }
         let headed: Result<()> = async {
             let ua = cdp
                 .call(
@@ -265,7 +277,8 @@ impl Session {
                 "offsite" => break Outcome::Offsite,
                 "prejoin" => {
                     if !named {
-                        named = self.enter_name().await.is_ok();
+                        // A signed-in profile has no name field on the pre-join page.
+                        named = self.enter_name().await.is_ok() || self.opts.cookies.is_some();
                         self.set_media(false, matches!(self.opts.role, Role::Bot))
                             .await?;
                     } else if state.can_join
@@ -491,6 +504,38 @@ fn random_token() -> Result<String> {
 
 fn decode_data_url(url: &str) -> Result<Vec<u8>> {
     decode_base64(url.split_once(',').context("not a data URL")?.1)
+}
+
+/// CDP cookies from `file`, cut down to the fields `Network.setCookies` takes. Session cookies lose `expires`.
+fn load_cookies(file: &Path) -> Result<Vec<Value>> {
+    let raw = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let all: Vec<Value> =
+        serde_json::from_slice(&raw).context("the cookie file is not a JSON array")?;
+    Ok(all
+        .into_iter()
+        .map(|c| {
+            let mut o = serde_json::Map::new();
+            for k in [
+                "name",
+                "value",
+                "domain",
+                "path",
+                "secure",
+                "httpOnly",
+                "sameSite",
+                "priority",
+                "partitionKey",
+            ] {
+                if let Some(v) = c.get(k) {
+                    o.insert(k.into(), v.clone());
+                }
+            }
+            if let Some(e) = c["expires"].as_f64().filter(|e| *e > 0.0) {
+                o.insert("expires".into(), e.into());
+            }
+            Value::Object(o)
+        })
+        .collect())
 }
 
 fn decode_base64(b64: &str) -> Result<Vec<u8>> {

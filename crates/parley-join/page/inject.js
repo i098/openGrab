@@ -262,7 +262,8 @@ registerProcessor("parley-pcm",P)`;
     if (hasAny(t, S.deniedText)) return { ...base, phase: "denied" };
     if (hasAny(t, S.notFoundText)) return { ...base, phase: "not_found" };
     if (hasAny(t, S.endedText)) return { ...base, phase: "ended" };
-    if (location.hostname !== "meet.google.com") return { ...base, phase: "offsite" };
+    // An empty hostname is the about:blank the driver starts on, not a leave to another site.
+    if (location.hostname && location.hostname !== "meet.google.com") return { ...base, phase: "offsite" };
     const waiting = hasAny(t, S.waitingText);
     if (!waiting && (q1(S.selfMarker) || q1(S.participantTile)) && shown(q1(S.leaveButton))) return { ...base, phase: "in_call" };
     if (waiting) return { ...base, phase: "waiting" };

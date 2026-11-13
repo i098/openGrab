@@ -10,7 +10,7 @@ No account name, e-mail address or cookie appears here.
 | Join kind | Verdict | Why |
 | --- | --- | --- |
 | Guest (no Google account) | **No-go, as tested** | Meet refused every guest with "You can't join this video call". The host was in the call each time and no knock reached the host. |
-| Signed-in bot | **Not tested yet** | The one sign-in attempt stopped at a Google phone prompt. The live checks come later as a new task. |
+| Signed-in bot | **Blocked, no session** | The session was to be loaded from the account owner's browser as cookies. That browser reports every Google account, the Workspace test account included, as "Signed out", so no session existed to load. The section 6.1 signed-in checks did not run. |
 
 Section 6.1 checks that ran: Join (guest) failed. Chat, Tile, Outsider and speakers-in-call did not run, because no run got into a call.
 One part of Phase 0 is proven: Chromium profiles can play a known recording as a microphone (F3).
@@ -81,7 +81,32 @@ On tmpfs it took 3 to 7 s.
 Launch, the pinned version, navigation to the Meet link, the injected script, the page-state read, the refusal text and a screenshot.
 The guest name screen and the "ask to join" request were reached only by browsers without `Runtime.enable`, and the host never saw a knock.
 
+## F5. Loading a signed-in session from cookies
+
+`p0_exit --cookies <file>` loads a JSON array of CDP cookies into the driver's own profile with
+`Network.setCookies` on the tab session, before the first navigation. The file stays outside the
+repository, mode 600, and is deleted when the run ends. Guest runs are unchanged.
+
+Measured on 2026-11-13:
+
+| Step | Result |
+| --- | --- |
+| `Storage.setCookies` on the browser target | No reply for 90 s, twice, while the host disk was 94% full and the load average above 90. |
+| `Network.setCookies` on the tab session | Works: 120 Google cookies sent, 32 read back for the two Meet and sign-in hosts. |
+| `accounts.google.com/ListAccounts` from that Chromium | HTTP 200, same account list as the source browser. |
+| `https://mail.google.com/` from that Chromium | Redirects to the sign-in account chooser. |
+| The same request with the same jar through `curl` | Redirects to `accounts.google.com/CookieMismatch`. |
+| `https://meet.google.com/` from that Chromium | Redirects to the Meet marketing page. |
+
+The transfer is mechanically sound and the session it carries is not usable: every account in the
+source browser is signed out, so the copied cookies are signed-out cookies. A session needs a
+password or a Google verify prompt, and this task allows neither. The signed-in join is blocked
+until a live session exists in that browser.
+
+Profiles now live under `/dev/shm` when it exists, because a cookie write to a profile on the
+host's main disk stalled the CDP reply past its timeout.
+
 ## Next
 
-The signed-in join is not tested. How a signed-in session gets loaded is not decided yet.
-After that decision, run `scripts/p0-exit.sh` for Join, Chat, Tile, Outsider and the three fake-audio speakers.
+A live session must exist in the owner's browser first; then `scripts/p0-exit.sh --cookies <file>`
+runs Join, Chat, Tile, Outsider and the three fake-audio speakers per section 6.1.

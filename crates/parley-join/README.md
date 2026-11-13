@@ -4,7 +4,7 @@ Phase 0 spike: a Rust driver that starts a pinned Chromium, opens a Google Meet
 link as a guest, and gets audio, chat, roster and a camera tile through one injected page script.
 The driver talks to Chromium through a thin CDP client (`src/cdp.rs`) and does not enable the CDP `Runtime`
 domain, because Meet refuses a guest whose tab has that domain on (see the findings). The driver does not hide that it is automated.
-The signed-in join is not part of this crate: how a signed-in session gets loaded is not decided yet.
+A signed-in run loads a session from a cookie file: `--cookies <file>` (or `PARLEY_COOKIES`) takes a JSON array of CDP cookies and sets them on the tab before the first navigation. Without it the run is a guest run.
 
 ## Pinned Chromium
 
@@ -51,7 +51,7 @@ Build and test with `blaze` (`blaze test -p parley-join`). `scripts/p0-exit.sh` 
 
 ## Phase 0 findings
 
-See `docs/phase0/join.md`: the guest join is a no-go as tested (Meet refuses every guest), the signed-in join is not tested yet, and `--use-file-for-fake-audio-capture` works.
+See `docs/phase0/join.md`: the guest join is a no-go as tested (Meet refuses every guest), the signed-in join is blocked until the source browser holds a live session, and `--use-file-for-fake-audio-capture` works.
 
 ## Limits
 
