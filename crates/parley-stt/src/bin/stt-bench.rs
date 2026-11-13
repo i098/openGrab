@@ -280,7 +280,6 @@ fn run_stt(
         }
     }
     if let Some(dir) = dump {
-        std::fs::create_dir_all(dir)?;
         std::fs::write(
             dir.join(format!("{}-t{threads}.txt", engine.name())),
             lines.join("\n"),
