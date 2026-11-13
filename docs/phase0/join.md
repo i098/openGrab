@@ -20,7 +20,8 @@ One part of Phase 0 is proven: Chromium profiles can play a known recording as a
 `crates/parley-join` starts a pinned Chromium (not headless, inside Xvfb), injects one page script, and drives the Meet page through a thin CDP client over one WebSocket.
 The driver never sends `Runtime.enable` and does not try to hide that it is automated.
 `scripts/p0-exit.sh <meet-link>` runs the section 6.1 checks and prints one PASS or FAIL line each.
-`--signin-email` signs in once with the password in `GOOGLE_ACCOUNT_PASSWORD`: no retry, no code entry, no recovery flow.
+Every launch fails when the browser product string or `navigator.userAgent` says headless.
+The crate has no sign-in code.
 See `crates/parley-join/README.md` for the Chromium version and the install command.
 
 ## F1. The guest refusal does not depend on the driver
@@ -49,7 +50,7 @@ Possible causes, none proven: a Google check on guests ("System info will be sen
 
 - A headless browser on a shared tier was rejected right after the account click: "Couldn't sign you in. This browser or app may not be secure."
 - A headed browser on another shared tier reached the password step. One password attempt gave no result. No retry.
-- The driver signed in once with `--signin-email` for a Workspace account. Google accepted the password and then showed "Verify it's you ... Google sent a notification to your phone. Open the Gmail app, tap Yes on the prompt" (URL path `/v3/signin/challenge/dp`).
+- A one-off driver sign-in (since removed from the crate) used a Workspace account. Google accepted the password and then showed "Verify it's you ... Google sent a notification to your phone. Open the Gmail app, tap Yes on the prompt" (URL path `/v3/signin/challenge/dp`).
   The driver stopped at once. This prompt reached the owner's phone as a side effect of the password step.
 - No Google session existed in the shared cookie store, so none was loaded. No session was pulled from any personal browser.
 
@@ -82,5 +83,5 @@ The guest name screen and the "ask to join" request were reached only by browser
 
 ## Next
 
-The signed-in bot needs a session that Google accepts without a phone prompt.
-Then run `scripts/p0-exit.sh` with `--signin-email` for Join, Chat, Tile, Outsider and the three fake-audio speakers.
+The signed-in join is not tested. How a signed-in session gets loaded is not decided yet.
+After that decision, run `scripts/p0-exit.sh` for Join, Chat, Tile, Outsider and the three fake-audio speakers.

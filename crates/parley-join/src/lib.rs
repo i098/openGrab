@@ -85,8 +85,6 @@ pub struct Session {
     opts: Opts,
     events: mpsc::UnboundedReceiver<CallEvent>,
     tasks: Vec<JoinHandle<()>>,
-    /// True after `sign_in`: the pre-join screen has no name field then.
-    signed_in: bool,
 }
 
 impl Session {
@@ -115,13 +113,13 @@ impl Session {
                 audio.display()
             ));
         }
-        // Mode 700 and deleted in `leave`: after `sign_in` the profile holds the Google session.
+        // Mode 700 and deleted in `leave`: the profile holds the browser's cookies.
         std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
             .create(&opts.profile)?;
         let port = free_port()?;
         // A fixed port, not 0: Chromium treats port 0 as automation mode and sets `navigator.webdriver` to true.
         // No `--enable-automation`, no stealth flags: a plain Chromium with a window and fake media devices.
-        let child = tokio::process::Command::new(&opts.chrome)
+        let mut child = tokio::process::Command::new(&opts.chrome)
             .arg(format!("--user-data-dir={}", opts.profile.display()))
             .arg(format!("--remote-debugging-port={port}"))
             .arg("--window-size=1280,800")
@@ -151,6 +149,37 @@ impl Session {
             .as_str()
             .context("no session id for the tab")?
             .to_string();
+        let headed: Result<()> = async {
+            let ua = cdp
+                .call(
+                    Some(&tab),
+                    "Runtime.evaluate",
+                    json!({"expression": "navigator.userAgent", "returnByValue": true}),
+                )
+                .await?["result"]["value"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .context("no navigator.userAgent")?
+                .to_string();
+            let v = cdp.call(None, "Browser.getVersion", json!({})).await?;
+            let product = v["product"].as_str().filter(|s| !s.is_empty());
+            let version_ua = v["userAgent"].as_str().filter(|s| !s.is_empty());
+            let (Some(product), Some(version_ua)) = (product, version_ua) else {
+                bail!("Browser.getVersion gave no product or userAgent");
+            };
+            for s in [ua.as_str(), product, version_ua] {
+                if s.to_lowercase().contains("headless") {
+                    bail!("the browser says headless ({s}): the bot runs headed only");
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(e) = headed {
+            let _ = child.kill().await;
+            let _ = std::fs::remove_dir_all(&opts.profile);
+            return Err(e);
+        }
         let cfg_js = serde_json::json!({
             "ws": ws_url,
             "role": if matches!(opts.role, Role::Bot) { "bot" } else { "speaker" },
@@ -173,7 +202,6 @@ impl Session {
             opts,
             events,
             tasks,
-            signed_in: false,
         })
     }
 
@@ -202,64 +230,6 @@ impl Session {
         }
     }
 
-    /// Wait for a visible element, focus it and type into it with real input events.
-    async fn type_into(&self, selector: &str, text: &str) -> Result<()> {
-        let sel = serde_json::to_string(selector)?;
-        let find = format!(
-            "(() => {{ const e = [...document.querySelectorAll({sel})].find(e => e.getBoundingClientRect().width > 0); if (e) e.focus(); return !!e; }})()"
-        );
-        for _ in 0..60 {
-            if self.eval::<bool>(&find).await.unwrap_or(false) {
-                return self.insert_text(text).await;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        bail!("no visible {selector} on the page")
-    }
-
-    async fn press_enter(&self) -> Result<()> {
-        for ty in ["keyDown", "keyUp"] {
-            self.cmd(
-                "Input.dispatchKeyEvent",
-                json!({"type": ty, "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "text": "\r"}),
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
-    /// Sign in to a Google account in this browser (bring-your-own-login): one attempt, with the
-    /// email and the password the caller holds. No retry, no code entry, no recovery flow: any
-    /// other step from Google ends in an error that carries the page text.
-    pub async fn sign_in(&mut self, email: &str, password: &str) -> Result<()> {
-        self.navigate("https://accounts.google.com/signin/v2/identifier?hl=en&continue=https%3A%2F%2Fmeet.google.com%2Flanding").await;
-        self.type_into("input[name=identifier], input[type=email]", email)
-            .await?;
-        self.press_enter().await?;
-        self.type_into("input[type=password]:not([aria-hidden=true])", password)
-            .await?;
-        self.press_enter().await?;
-        for _ in 0..40 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let (url, text): (String, String) = self
-                .eval("[location.href, document.body ? document.body.innerText.slice(0, 300) : '']")
-                .await
-                .unwrap_or_default();
-            if url.starts_with("https://meet.google.com") {
-                self.signed_in = true;
-                return Ok(());
-            }
-            if url.contains("/challenge/") && !url.contains("/pwd") || url.contains("/rejected") {
-                let path = url.split('?').next().unwrap_or_default();
-                bail!(
-                    "Google did not sign the account in: {path}: {}",
-                    text.replace('\n', " ")
-                );
-            }
-        }
-        bail!("sign-in did not finish in 40 s")
-    }
-
     /// Open the Meet link, pass the pre-join screen (a guest types a name), ask to join and wait for the host.
     pub async fn join(&mut self, url: &str, timeout: Duration) -> Result<JoinReport> {
         let start = Instant::now();
@@ -281,7 +251,7 @@ impl Session {
                 "offsite" => break Outcome::Offsite,
                 "prejoin" => {
                     if !named {
-                        named = self.signed_in || self.enter_name().await.is_ok();
+                        named = self.enter_name().await.is_ok();
                         self.set_media(false, matches!(self.opts.role, Role::Bot))
                             .await?;
                     } else if state.can_join

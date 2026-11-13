@@ -4,7 +4,7 @@ Phase 0 spike: a Rust driver that starts a pinned Chromium, opens a Google Meet
 link as a guest, and gets audio, chat, roster and a camera tile through one injected page script.
 The driver talks to Chromium through a thin CDP client (`src/cdp.rs`) and does not enable the CDP `Runtime`
 domain, because Meet refuses a guest whose tab has that domain on (see the findings). The driver does not hide that it is automated.
-The signed-in join is not part of this crate yet.
+The signed-in join is not part of this crate: how a signed-in session gets loaded is not decided yet.
 
 ## Pinned Chromium
 
@@ -44,7 +44,7 @@ scripts/p0-exit.sh 'https://meet.google.com/abc-defg-hij' --out /tmp/p0 --speake
 
 The host admits every guest. The script prints one `PASS` or `FAIL` line per check: `join`,
 `chat` (10 host messages, one reply for each), `tile` (two states), `outsider` (writes
-`outsider.json`, the per-participant fields the page gives the bot), `speakers` (three more
+`participants.json`, the per-participant fields the page gives the bot), `speakers` (three more
 Chromium profiles, each with `--use-file-for-fake-audio-capture`).
 
 Build and test with `blaze` (`blaze test -p parley-join`). `scripts/p0-exit.sh` falls back to cargo only when blaze is not installed.
@@ -56,4 +56,4 @@ See `docs/phase0/join.md`: the guest join is a no-go as tested (Meet refuses eve
 ## Limits
 
 - The driver records Meet's refusal text as the outcome and does not try to hide that it is automated.
-- `p0_exit --signin-email <addr>` (password in `GOOGLE_ACCOUNT_PASSWORD`) signs in once, with no retry, code entry or recovery. A Google "Verify it's you" step ends the run with the page text.
+- Every launch fails when the browser product string or `navigator.userAgent` says headless.

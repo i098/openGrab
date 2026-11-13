@@ -23,10 +23,6 @@ struct Args {
     chrome: Option<PathBuf>,
     #[arg(long, default_value = "Parley Notetaker")]
     name: String,
-    /// Sign the bot in as this Google account first (bring-your-own-login). The password comes from
-    /// the environment variable GOOGLE_ACCOUNT_PASSWORD; one attempt, no code entry, no recovery.
-    #[arg(long)]
-    signin_email: Option<String>,
     /// Join attempts. The last one stays in the call for the other checks.
     #[arg(long, default_value_t = 1)]
     joins: u32,
@@ -134,10 +130,6 @@ fn launch_opts(chrome: &Path, tag: &str, name: &str, role: Role) -> Opts {
 async fn main() -> Result<()> {
     let a = Args::parse();
     let want = |c: &str| a.checks.iter().any(|x| x == c);
-    if a.signin_email.is_some() && a.joins != 1 {
-        // Each attempt uses a fresh profile, so each would sign in again.
-        bail!("--signin-email allows one sign-in: use --joins 1");
-    }
     let out = a
         .out
         .clone()
@@ -161,19 +153,6 @@ async fn main() -> Result<()> {
         .await?;
         if i == 1 {
             println!("chromium: {}", s.version().await?);
-        }
-        if let Some(email) = &a.signin_email {
-            let pw = std::env::var("GOOGLE_ACCOUNT_PASSWORD")
-                .context("--signin-email needs GOOGLE_ACCOUNT_PASSWORD in the environment")?;
-            match s.sign_in(email, &pw).await {
-                Ok(()) => println!("signed in as {email}"),
-                Err(e) => {
-                    let _ = s.screenshot(&out.join("signin.png")).await;
-                    println!("FAIL join: {e:#}");
-                    s.leave().await?;
-                    bail!("sign-in failed");
-                }
-            }
         }
         println!(
             "join {i}/{}: asking to join as \"{}\"; the host must admit it",
@@ -313,6 +292,9 @@ async fn main() -> Result<()> {
     write_summary(&out, &results)?;
     bot.screenshot(&out.join("end.png")).await?;
     bot.leave().await?;
+    if results.iter().any(|(_, ok)| !ok) {
+        bail!("a check failed");
+    }
     Ok(())
 }
 
