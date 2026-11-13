@@ -1,0 +1,12 @@
+[package]
+name = "parley-stt"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Speech-to-text for Parley: Silero VAD in front of Parakeet TDT or Whisper, plus the speaker diarization fallback."
+publish = false
+
+[dependencies]
+sherpa-onnx = "2.0.1"
+thiserror = "2"
+claxon = "0.4"
