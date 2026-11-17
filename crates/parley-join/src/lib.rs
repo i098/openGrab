@@ -59,6 +59,53 @@ pub enum Outcome {
     Timeout,
 }
 
+/// Accept a persistent profile path only if it is outside the repository and is new, empty or an existing Chromium profile.
+/// It changes nothing on disk, so a rejected directory keeps its mode and content.
+pub fn check_profile(profile: &Path) -> Result<()> {
+    let abs = std::path::absolute(profile)?;
+    let mut tail = Vec::new();
+    let mut head = abs.as_path();
+    while !head.exists() {
+        tail.push(
+            head.file_name()
+                .context("profile path has no usable name")?,
+        );
+        head = head.parent().context("profile path has no parent")?;
+    }
+    let mut resolved = head.canonicalize()?;
+    resolved.extend(tail.iter().rev());
+    let mut roots = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")];
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.extend(
+            cwd.ancestors()
+                .filter(|d| d.join(".git").exists())
+                .map(Path::to_path_buf),
+        );
+    }
+    for root in roots.iter().filter_map(|r| r.canonicalize().ok()) {
+        if resolved.starts_with(&root) {
+            bail!(
+                "profile {} is inside the repository {}",
+                profile.display(),
+                root.display()
+            );
+        }
+    }
+    if resolved.exists() {
+        if !resolved.is_dir() {
+            bail!("profile {} is not a directory", profile.display());
+        }
+        if resolved.join("Local State").exists() || std::fs::read_dir(&resolved)?.next().is_none() {
+            return Ok(());
+        }
+        bail!(
+            "profile {} is not empty and is not a Chromium profile",
+            profile.display()
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PageState {
     #[serde(default)]
@@ -133,7 +180,7 @@ impl Session {
                 audio.display()
             ));
         }
-        // The profile contains credentials, including when the directory already exists.
+        // The profile holds the browser's cookies; a persistent one may already exist (see `check_profile`).
         std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
             .create(&opts.profile)?;
         std::fs::set_permissions(
@@ -274,8 +321,8 @@ impl Session {
                 "offsite" => break Outcome::Offsite,
                 "prejoin" => {
                     if !named {
-                        // A signed-in profile has no name field on the pre-join page.
-                        named = self.enter_name().await.is_ok() || self.opts.persistent_profile;
+                        // A signed-in profile has no name field: its join button is already enabled.
+                        named = self.enter_name().await.is_ok() || state.can_join;
                         self.set_media(false, matches!(self.opts.role, Role::Bot))
                             .await?;
                     } else if state.can_join
@@ -604,6 +651,39 @@ mod tests {
                     0o700
                 );
             }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn check_profile_rejects_repository_and_arbitrary_directories_without_changing_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "parley-check-profile-{}-{}",
+            std::process::id(),
+            super::random_token().unwrap()
+        ));
+        let other = root.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("notes.txt"), b"x").unwrap();
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(super::check_profile(&other).is_err());
+        assert_eq!(
+            std::fs::metadata(&other).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(std::fs::read_dir(&other).unwrap().count() == 1);
+
+        let repo_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bot-profile");
+        assert!(super::check_profile(&repo_path).is_err());
+        assert!(!repo_path.exists());
+
+        let chromium = root.join("chromium");
+        std::fs::create_dir_all(&chromium).unwrap();
+        std::fs::write(chromium.join("Local State"), b"{}").unwrap();
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        for ok in [chromium, empty, root.join("new/profile")] {
+            super::check_profile(&ok).unwrap();
         }
         std::fs::remove_dir_all(root).unwrap();
     }

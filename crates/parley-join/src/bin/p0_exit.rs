@@ -26,9 +26,6 @@ struct Args {
     /// Join attempts. The last one stays in the call for the other checks.
     #[arg(long, default_value_t = 1)]
     joins: u32,
-    /// Seconds to wait between join attempts.
-    #[arg(long, default_value_t = 0)]
-    join_gap: u64,
     #[arg(long, default_value_t = 300)]
     join_timeout: u64,
     /// Persistent bot profile outside the repository. Sign in once before running the checks.
@@ -120,27 +117,15 @@ fn find_chrome() -> Result<PathBuf> {
         .join("chrome-linux64/chrome"))
 }
 
-/// Temporary profiles use tmpfs when available to avoid slow browser storage operations.
-fn profile_root() -> PathBuf {
-    let shm = PathBuf::from("/dev/shm");
-    let base = if shm.is_dir() {
-        shm
-    } else {
-        std::env::temp_dir()
-    };
-    base.join(format!("parley-p0-{}", std::process::id()))
-}
-
+/// Profiles live in the temp dir (tmpfs on this host): on a slow disk Chromium stalls page loads past CDP timeouts.
 fn launch_opts(a: &Args, chrome: &Path, tag: &str, name: &str, role: Role) -> Opts {
     let persistent_profile = matches!(role, Role::Bot) && a.profile.is_some();
     Opts {
         chrome: chrome.into(),
         profile: if matches!(role, Role::Bot) {
-            a.profile
-                .clone()
-                .unwrap_or_else(|| profile_root().join(tag))
+            a.profile.clone().unwrap_or_else(|| temp_profile(tag))
         } else {
-            profile_root().join(tag)
+            temp_profile(tag)
         },
         name: name.into(),
         role,
@@ -148,9 +133,18 @@ fn launch_opts(a: &Args, chrome: &Path, tag: &str, name: &str, role: Role) -> Op
     }
 }
 
+fn temp_profile(tag: &str) -> PathBuf {
+    std::env::temp_dir()
+        .join(format!("parley-p0-{}", std::process::id()))
+        .join(tag)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let a = Args::parse();
+    if let Some(p) = &a.profile {
+        parley_join::check_profile(p)?;
+    }
     let want = |c: &str| a.checks.iter().any(|x| x == c);
     let out = a
         .out
@@ -161,14 +155,11 @@ async fn main() -> Result<()> {
     let mut results = Vec::new();
     let mut col = Collected::default();
 
-    // Join: `joins` attempts, each with a fresh profile; the last one stays.
+    // Join: `joins` attempts, each with a fresh temporary profile, or the shared `--profile`; the last one stays.
     let mut admitted = 0u32;
     let mut bot: Option<Session> = None;
     let mut joins_log = String::new();
     for i in 1..=a.joins {
-        if i > 1 {
-            tokio::time::sleep(Duration::from_secs(a.join_gap)).await;
-        }
         let mut s = Session::launch(launch_opts(
             &a,
             &chrome,

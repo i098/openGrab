@@ -101,7 +101,8 @@ The source browser later showed every account as signed out. These observations 
 when or why its sessions ended. An account list alone does not prove that a session is usable.
 
 The replacement is `p0_exit --profile <directory>`. It retains a server-local browser profile at mode 700.
-Temporary profiles still use `/dev/shm` when available and are deleted after the browser exits.
+The profile must be outside the repository, and new, empty or an existing Chromium profile; the driver rejects any other directory without changing it.
+Temporary profiles are deleted after the browser exits.
 
 ## Next
 

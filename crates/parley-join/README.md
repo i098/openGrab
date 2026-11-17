@@ -4,7 +4,7 @@ Phase 0 spike: a Rust driver that starts a pinned Chromium, opens a Google Meet
 link as a guest, and gets audio, chat, roster and a camera tile through one injected page script.
 The driver talks to Chromium through a thin CDP client (`src/cdp.rs`) and does not enable the CDP `Runtime`
 domain, because Meet refuses a guest whose tab has that domain on (see the findings). The driver does not hide that it is automated.
-Use `--profile <directory>` for a persistent bot profile outside the repository.
+Use `--profile <directory>` for a persistent bot profile outside the repository (new, empty or an existing Chromium profile).
 Sign in locally in that profile before running the checks. The driver keeps it at mode 700.
 Without this option, the driver deletes its temporary profile when it exits.
 Google cookie import is not supported.
