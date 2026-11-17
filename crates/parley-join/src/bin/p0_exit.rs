@@ -1,4 +1,4 @@
-//! Phase 0 exit test for the guest join (plan 6.1): Join, Chat, Tile, Outsider input, fake-audio speakers.
+//! Phase 0 exit test (plan 6.1): Join, Chat, Tile, Outsider input, fake-audio speakers.
 //! Run it through `scripts/p0-exit.sh`, which wraps it in Xvfb. One PASS or FAIL line per check.
 
 use anyhow::{Context, Result, bail};
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
-#[command(about = "Phase 0 exit test: guest join of a Google Meet call")]
+#[command(about = "Phase 0 exit test: Google Meet join")]
 struct Args {
     /// The Meet link. The host must admit every guest that asks to join.
     link: String,
@@ -28,6 +28,9 @@ struct Args {
     joins: u32,
     #[arg(long, default_value_t = 300)]
     join_timeout: u64,
+    /// Persistent bot profile outside the repository. Sign in once before running the checks.
+    #[arg(long)]
+    profile: Option<PathBuf>,
     #[arg(long, default_value_t = 10)]
     chat_count: u32,
     #[arg(long, default_value_t = 600)]
@@ -114,21 +117,35 @@ fn find_chrome() -> Result<PathBuf> {
         .join("chrome-linux64/chrome"))
 }
 
-/// Profiles live in the temp dir (tmpfs on this host): on a slow disk Chromium stalls page loads past CDP timeouts.
-fn launch_opts(chrome: &Path, tag: &str, name: &str, role: Role) -> Opts {
+/// Temporary profiles live in the temp dir (tmpfs on this host): on a slow disk Chromium stalls page loads past CDP timeouts.
+/// The bot uses `--profile` instead when given; it stays where the operator put it.
+fn launch_opts(a: &Args, chrome: &Path, tag: &str, name: &str, role: Role) -> Opts {
+    let persistent_profile = matches!(role, Role::Bot) && a.profile.is_some();
     Opts {
         chrome: chrome.into(),
-        profile: std::env::temp_dir()
-            .join(format!("parley-p0-{}", std::process::id()))
-            .join(tag),
+        profile: if matches!(role, Role::Bot) {
+            a.profile.clone().unwrap_or_else(|| temp_profile(tag))
+        } else {
+            temp_profile(tag)
+        },
         name: name.into(),
         role,
+        persistent_profile,
     }
+}
+
+fn temp_profile(tag: &str) -> PathBuf {
+    std::env::temp_dir()
+        .join(format!("parley-p0-{}", std::process::id()))
+        .join(tag)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let a = Args::parse();
+    if let Some(p) = &a.profile {
+        parley_join::check_profile(p)?;
+    }
     let want = |c: &str| a.checks.iter().any(|x| x == c);
     let out = a
         .out
@@ -139,12 +156,13 @@ async fn main() -> Result<()> {
     let mut results = Vec::new();
     let mut col = Collected::default();
 
-    // Join: `joins` attempts, each with a fresh profile; the last one stays.
+    // Join: `joins` attempts, each with a fresh temporary profile, or the shared `--profile`; the last one stays.
     let mut admitted = 0u32;
     let mut bot: Option<Session> = None;
     let mut joins_log = String::new();
     for i in 1..=a.joins {
         let mut s = Session::launch(launch_opts(
+            &a,
             &chrome,
             &format!("bot-{i}"),
             &a.name,
@@ -181,7 +199,7 @@ async fn main() -> Result<()> {
             admitted * 10 >= a.joins * 9 && admitted > 0,
             "join",
             format!(
-                "{admitted} of {} guest joins reached the call (go limit: 9 of 10)",
+                "{admitted} of {} joins reached the call (go limit: 9 of 10)",
                 a.joins
             ),
             &mut results,
@@ -231,7 +249,7 @@ async fn main() -> Result<()> {
         std::fs::write(
             &file,
             serde_json::to_string_pretty(
-                &serde_json::json!({"bot_kind": "guest", "snapshots": snaps}),
+                &serde_json::json!({"bot_kind": if a.profile.is_some() { "persistent_profile" } else { "guest" }, "snapshots": snaps}),
             )?,
         )?;
         verdict(
@@ -340,6 +358,7 @@ async fn speakers(
             .context("speaker wav missing")?;
         s.push(
             Session::launch(launch_opts(
+                a,
                 chrome,
                 &format!("speaker-{i}"),
                 n,

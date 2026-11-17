@@ -10,7 +10,7 @@ No account name, e-mail address or cookie appears here.
 | Join kind | Verdict | Why |
 | --- | --- | --- |
 | Guest (no Google account) | **No-go, as tested** | Meet refused every guest with "You can't join this video call". The host was in the call each time and no knock reached the host. |
-| Signed-in bot | **Not tested yet** | The one sign-in attempt stopped at a Google phone prompt. The live checks come later as a new task. |
+| Signed-in bot | **NOT RUN** | The signed-in join waits on a local sign-in in the persistent `--profile` profile. The section 6.1 checks (Join, Chat, Tile, Outsider, speakers) did not run. The earlier cookie-copy attempt is recorded in F5 as history only. |
 
 Section 6.1 checks that ran: Join (guest) failed. Chat, Tile, Outsider and speakers-in-call did not run, because no run got into a call.
 One part of Phase 0 is proven: Chromium profiles can play a known recording as a microphone (F3).
@@ -52,7 +52,7 @@ Possible causes, none proven: a Google check on guests ("System info will be sen
 - A headed browser on another shared tier reached the password step. One password attempt gave no result. No retry.
 - A one-off driver sign-in (since removed from the crate) used a Workspace account. Google accepted the password and then showed "Verify it's you ... Google sent a notification to your phone. Open the Gmail app, tap Yes on the prompt" (URL path `/v3/signin/challenge/dp`).
   The driver stopped at once. This prompt reached the owner's phone as a side effect of the password step.
-- No Google session existed in the shared cookie store, so none was loaded. No session was pulled from any personal browser.
+- No Google session existed in the shared cookie store, so none was loaded. No session was pulled from any personal browser in these attempts (F5 records a later cookie-copy attempt).
 
 ## F3. `--use-file-for-fake-audio-capture` works (plan row "not tested")
 
@@ -74,14 +74,37 @@ Not proven: that Meet shows each profile as a separate speaker with a speaking i
 
 With `--user-data-dir` on a busy disk (89% full, load average about 95) the first navigation timed out.
 On tmpfs it took 3 to 7 s.
-`p0_exit` keeps the profiles in the temp directory and the driver tolerates a late `Page.navigate` reply.
+`p0_exit` keeps temporary profiles in the temp directory and the driver tolerates a late `Page.navigate` reply. A `--profile` directory stays where the operator put it.
 
 ## Reached with no host
 
 Launch, the pinned version, navigation to the Meet link, the injected script, the page-state read, the refusal text and a screenshot.
 The guest name screen and the "ask to join" request were reached only by browsers without `Runtime.enable`, and the host never saw a knock.
 
+## F5. Historical cookie-import attempt
+
+The following results describe the removed cookie-import implementation.
+Google session copying is no longer permitted or supported.
+
+Measured on 2026-11-13:
+
+| Step | Result |
+| --- | --- |
+| `Storage.setCookies` on the browser target | No reply for 90 s, twice, while the host disk was 94% full and the load average above 90. |
+| `Network.setCookies` on the tab session | Works: 120 Google cookies sent, 32 read back for the two Meet and sign-in hosts. |
+| `accounts.google.com/ListAccounts` from that Chromium | HTTP 200, same account list as the source browser. |
+| `https://mail.google.com/` from that Chromium | Redirects to the sign-in account chooser. |
+| The same request with the same jar through `curl` | Redirects to `accounts.google.com/CookieMismatch`. |
+| `https://meet.google.com/` from that Chromium | Redirects to the Meet marketing page. |
+
+The source browser later showed every account as signed out. These observations do not establish
+when or why its sessions ended. An account list alone does not prove that a session is usable.
+
+The replacement is `p0_exit --profile <directory>`. It retains a server-local browser profile at mode 700.
+The profile must be outside the repository, and new, empty or an existing Chromium profile; the driver rejects any other directory without changing it.
+Temporary profiles are deleted after the browser exits.
+
 ## Next
 
-The signed-in join is not tested. How a signed-in session gets loaded is not decided yet.
-After that decision, run `scripts/p0-exit.sh` for Join, Chat, Tile, Outsider and the three fake-audio speakers.
+Sign in locally in the persistent profile before running the section 6.1 checks.
+Live tests wait for the verified virtual-phone setup. No new login has started in this resumed task.

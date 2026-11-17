@@ -2,7 +2,7 @@
 //!
 //! The driver starts a pinned, non-headless Chromium (run it inside Xvfb, R1), injects
 //! `page/inject.js` before the page loads, and talks to it over a local WebSocket (audio, chat,
-//! roster) and CDP (clicks, text input, commands). It signs in to nothing: guest join only.
+//! roster) and CDP (clicks, text input, commands). A persistent profile retains a local sign-in.
 
 pub mod analysis;
 pub mod cdp;
@@ -41,6 +41,8 @@ pub struct Opts {
     pub profile: PathBuf,
     pub name: String,
     pub role: Role,
+    /// Keep the profile after the browser exits.
+    pub persistent_profile: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -55,6 +57,53 @@ pub enum Outcome {
     /// The page left meet.google.com, for example to a Google sign-in page.
     Offsite,
     Timeout,
+}
+
+/// Accept a persistent profile path only if it is outside the repository and is new, empty or an existing Chromium profile.
+/// It changes nothing on disk, so a rejected directory keeps its mode and content.
+pub fn check_profile(profile: &Path) -> Result<()> {
+    let abs = std::path::absolute(profile)?;
+    let mut tail = Vec::new();
+    let mut head = abs.as_path();
+    while !head.exists() {
+        tail.push(
+            head.file_name()
+                .context("profile path has no usable name")?,
+        );
+        head = head.parent().context("profile path has no parent")?;
+    }
+    let mut resolved = head.canonicalize()?;
+    resolved.extend(tail.iter().rev());
+    let mut roots = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")];
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.extend(
+            cwd.ancestors()
+                .filter(|d| d.join(".git").exists())
+                .map(Path::to_path_buf),
+        );
+    }
+    for root in roots.iter().filter_map(|r| r.canonicalize().ok()) {
+        if resolved.starts_with(&root) {
+            bail!(
+                "profile {} is inside the repository {}",
+                profile.display(),
+                root.display()
+            );
+        }
+    }
+    if resolved.exists() {
+        if !resolved.is_dir() {
+            bail!("profile {} is not a directory", profile.display());
+        }
+        if resolved.join("Local State").exists() || std::fs::read_dir(&resolved)?.next().is_none() {
+            return Ok(());
+        }
+        bail!(
+            "profile {} is not empty and is not a Chromium profile",
+            profile.display()
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -101,10 +150,13 @@ impl Session {
         let task = tokio::spawn(serve(listener, token, tx));
         let abort = task.abort_handle();
         let profile = opts.profile.clone();
+        let persistent = opts.persistent_profile;
         let started = Self::start(opts, ws_url, events, vec![task]).await;
         if started.is_err() {
             abort.abort();
-            let _ = std::fs::remove_dir_all(profile);
+            if !persistent {
+                let _ = std::fs::remove_dir_all(profile);
+            }
         }
         started
     }
@@ -128,9 +180,13 @@ impl Session {
                 audio.display()
             ));
         }
-        // Mode 700 and deleted when the session drops: the profile holds the browser's cookies.
+        // The profile holds the browser's cookies; a persistent one may already exist (see `check_profile`).
         std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
             .create(&opts.profile)?;
+        std::fs::set_permissions(
+            &opts.profile,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )?;
         let port = free_port()?;
         // A fixed port, not 0: Chromium treats port 0 as automation mode and sets `navigator.webdriver` to true.
         // No `--enable-automation`, no stealth flags: a plain Chromium with a window and fake media devices.
@@ -265,7 +321,8 @@ impl Session {
                 "offsite" => break Outcome::Offsite,
                 "prejoin" => {
                     if !named {
-                        named = self.enter_name().await.is_ok();
+                        // A signed-in profile has no name field: its join button is already enabled.
+                        named = self.enter_name().await.is_ok() || state.can_join;
                         self.set_media(false, matches!(self.opts.role, Role::Bot))
                             .await?;
                     } else if state.can_join
@@ -458,7 +515,9 @@ impl Drop for Session {
         for t in &self.tasks {
             t.abort();
         }
-        let _ = std::fs::remove_dir_all(&self.opts.profile);
+        if !self.opts.persistent_profile {
+            let _ = std::fs::remove_dir_all(&self.opts.profile);
+        }
     }
 }
 
@@ -547,6 +606,87 @@ async fn serve(listener: TcpListener, token: String, tx: mpsc::UnboundedSender<C
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn failed_launch_keeps_persistent_profile_and_removes_temporary_profile() {
+        if std::env::var_os("PARLEY_PROFILE_TEST_CHILD").is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::failed_launch_keeps_persistent_profile_and_removes_temporary_profile",
+                ])
+                .env("PARLEY_PROFILE_TEST_CHILD", "1")
+                .env("DISPLAY", ":999")
+                .status()
+                .unwrap();
+            assert!(result.success());
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "parley-profile-test-{}-{}",
+            std::process::id(),
+            super::random_token().unwrap()
+        ));
+        for persistent_profile in [true, false] {
+            let profile = root.join(persistent_profile.to_string());
+            std::fs::create_dir_all(&profile).unwrap();
+            std::fs::write(profile.join("existing-session"), b"test").unwrap();
+            let result = super::Session::launch(super::Opts {
+                chrome: root.join("missing-browser"),
+                profile: profile.clone(),
+                name: "test".into(),
+                role: super::Role::Bot,
+                persistent_profile,
+            })
+            .await;
+            assert!(result.is_err());
+            assert_eq!(profile.exists(), persistent_profile);
+            if persistent_profile {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::read(profile.join("existing-session")).unwrap(),
+                    b"test"
+                );
+                assert_eq!(
+                    std::fs::metadata(&profile).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn check_profile_rejects_repository_and_arbitrary_directories_without_changing_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "parley-check-profile-{}-{}",
+            std::process::id(),
+            super::random_token().unwrap()
+        ));
+        let other = root.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("notes.txt"), b"x").unwrap();
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(super::check_profile(&other).is_err());
+        assert_eq!(
+            std::fs::metadata(&other).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(std::fs::read_dir(&other).unwrap().count() == 1);
+
+        let repo_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bot-profile");
+        assert!(super::check_profile(&repo_path).is_err());
+        assert!(!repo_path.exists());
+
+        let chromium = root.join("chromium");
+        std::fs::create_dir_all(&chromium).unwrap();
+        std::fs::write(chromium.join("Local State"), b"{}").unwrap();
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        for ok in [chromium, empty, root.join("new/profile")] {
+            super::check_profile(&ok).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn data_url_decodes_to_the_png_bytes() {
         // "\x89PNG" is iVBORw==
