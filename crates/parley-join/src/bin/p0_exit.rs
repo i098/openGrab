@@ -1,4 +1,4 @@
-//! Phase 0 exit test for the guest join (plan 6.1): Join, Chat, Tile, Outsider input, fake-audio speakers.
+//! Phase 0 exit test (plan 6.1): Join, Chat, Tile, Outsider input, fake-audio speakers.
 //! Run it through `scripts/p0-exit.sh`, which wraps it in Xvfb. One PASS or FAIL line per check.
 
 use anyhow::{Context, Result, bail};
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
-#[command(about = "Phase 0 exit test: guest join of a Google Meet call")]
+#[command(about = "Phase 0 exit test: Google Meet join")]
 struct Args {
     /// The Meet link. The host must admit every guest that asks to join.
     link: String,
@@ -31,10 +31,9 @@ struct Args {
     join_gap: u64,
     #[arg(long, default_value_t = 300)]
     join_timeout: u64,
-    /// JSON cookie file (CDP `Storage.getCookies` format) of the account to sign in as. Without it every profile joins as a guest.
-    /// Every profile, speakers included, loads it. Keep the file outside the repo, mode 600.
-    #[arg(long, env = "PARLEY_COOKIES")]
-    cookies: Option<PathBuf>,
+    /// Persistent bot profile outside the repository. Sign in once before running the checks.
+    #[arg(long)]
+    profile: Option<PathBuf>,
     #[arg(long, default_value_t = 10)]
     chat_count: u32,
     #[arg(long, default_value_t = 600)]
@@ -121,8 +120,7 @@ fn find_chrome() -> Result<PathBuf> {
         .join("chrome-linux64/chrome"))
 }
 
-/// Profiles live on tmpfs: on a slow disk Chromium stalls page loads and cookie writes past CDP timeouts,
-/// and a cookie write is how a signed-in profile is loaded.
+/// Temporary profiles use tmpfs when available to avoid slow browser storage operations.
 fn profile_root() -> PathBuf {
     let shm = PathBuf::from("/dev/shm");
     let base = if shm.is_dir() {
@@ -134,12 +132,19 @@ fn profile_root() -> PathBuf {
 }
 
 fn launch_opts(a: &Args, chrome: &Path, tag: &str, name: &str, role: Role) -> Opts {
+    let persistent_profile = matches!(role, Role::Bot) && a.profile.is_some();
     Opts {
         chrome: chrome.into(),
-        profile: profile_root().join(tag),
+        profile: if matches!(role, Role::Bot) {
+            a.profile
+                .clone()
+                .unwrap_or_else(|| profile_root().join(tag))
+        } else {
+            profile_root().join(tag)
+        },
         name: name.into(),
         role,
-        cookies: a.cookies.clone(),
+        persistent_profile,
     }
 }
 
@@ -252,7 +257,7 @@ async fn main() -> Result<()> {
         std::fs::write(
             &file,
             serde_json::to_string_pretty(
-                &serde_json::json!({"bot_kind": if a.cookies.is_some() { "signed_in" } else { "guest" }, "snapshots": snaps}),
+                &serde_json::json!({"bot_kind": if a.profile.is_some() { "persistent_profile" } else { "guest" }, "snapshots": snaps}),
             )?,
         )?;
         verdict(

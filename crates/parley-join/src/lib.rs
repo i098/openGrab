@@ -2,7 +2,7 @@
 //!
 //! The driver starts a pinned, non-headless Chromium (run it inside Xvfb, R1), injects
 //! `page/inject.js` before the page loads, and talks to it over a local WebSocket (audio, chat,
-//! roster) and CDP (clicks, text input, commands). It joins as a guest, or signed in when `Opts::cookies` holds a session.
+//! roster) and CDP (clicks, text input, commands). A persistent profile retains a local sign-in.
 
 pub mod analysis;
 pub mod cdp;
@@ -41,9 +41,8 @@ pub struct Opts {
     pub profile: PathBuf,
     pub name: String,
     pub role: Role,
-    /// A JSON array of CDP cookies (as `Storage.getCookies` returns them) of the account the bot signs in as.
-    /// `None` means a guest join. The file stays outside the repo; the driver never logs a value.
-    pub cookies: Option<PathBuf>,
+    /// Keep the profile after the browser exits.
+    pub persistent_profile: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -104,10 +103,13 @@ impl Session {
         let task = tokio::spawn(serve(listener, token, tx));
         let abort = task.abort_handle();
         let profile = opts.profile.clone();
+        let persistent = opts.persistent_profile;
         let started = Self::start(opts, ws_url, events, vec![task]).await;
         if started.is_err() {
             abort.abort();
-            let _ = std::fs::remove_dir_all(profile);
+            if !persistent {
+                let _ = std::fs::remove_dir_all(profile);
+            }
         }
         started
     }
@@ -131,9 +133,13 @@ impl Session {
                 audio.display()
             ));
         }
-        // Mode 700 and deleted when the session drops: the profile holds the browser's cookies.
+        // The profile contains credentials, including when the directory already exists.
         std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
             .create(&opts.profile)?;
+        std::fs::set_permissions(
+            &opts.profile,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )?;
         let port = free_port()?;
         // A fixed port, not 0: Chromium treats port 0 as automation mode and sets `navigator.webdriver` to true.
         // No `--enable-automation`, no stealth flags: a plain Chromium with a window and fake media devices.
@@ -167,15 +173,6 @@ impl Session {
             .as_str()
             .context("no session id for the tab")?
             .to_string();
-        if let Some(file) = &opts.cookies {
-            let cookies = load_cookies(file)?;
-            cdp.call(
-                Some(&tab),
-                "Network.setCookies",
-                json!({ "cookies": cookies }),
-            )
-            .await?;
-        }
         let headed: Result<()> = async {
             let ua = cdp
                 .call(
@@ -278,7 +275,7 @@ impl Session {
                 "prejoin" => {
                     if !named {
                         // A signed-in profile has no name field on the pre-join page.
-                        named = self.enter_name().await.is_ok() || self.opts.cookies.is_some();
+                        named = self.enter_name().await.is_ok() || self.opts.persistent_profile;
                         self.set_media(false, matches!(self.opts.role, Role::Bot))
                             .await?;
                     } else if state.can_join
@@ -471,7 +468,9 @@ impl Drop for Session {
         for t in &self.tasks {
             t.abort();
         }
-        let _ = std::fs::remove_dir_all(&self.opts.profile);
+        if !self.opts.persistent_profile {
+            let _ = std::fs::remove_dir_all(&self.opts.profile);
+        }
     }
 }
 
@@ -504,38 +503,6 @@ fn random_token() -> Result<String> {
 
 fn decode_data_url(url: &str) -> Result<Vec<u8>> {
     decode_base64(url.split_once(',').context("not a data URL")?.1)
-}
-
-/// CDP cookies from `file`, cut down to the fields `Network.setCookies` takes. Session cookies lose `expires`.
-fn load_cookies(file: &Path) -> Result<Vec<Value>> {
-    let raw = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
-    let all: Vec<Value> =
-        serde_json::from_slice(&raw).context("the cookie file is not a JSON array")?;
-    Ok(all
-        .into_iter()
-        .map(|c| {
-            let mut o = serde_json::Map::new();
-            for k in [
-                "name",
-                "value",
-                "domain",
-                "path",
-                "secure",
-                "httpOnly",
-                "sameSite",
-                "priority",
-                "partitionKey",
-            ] {
-                if let Some(v) = c.get(k) {
-                    o.insert(k.into(), v.clone());
-                }
-            }
-            if let Some(e) = c["expires"].as_f64().filter(|e| *e > 0.0) {
-                o.insert("expires".into(), e.into());
-            }
-            Value::Object(o)
-        })
-        .collect())
 }
 
 fn decode_base64(b64: &str) -> Result<Vec<u8>> {
@@ -592,6 +559,41 @@ async fn serve(listener: TcpListener, token: String, tx: mpsc::UnboundedSender<C
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn failed_launch_keeps_persistent_profile_and_removes_temporary_profile() {
+        let root = std::env::temp_dir().join(format!(
+            "parley-profile-test-{}-{}",
+            std::process::id(),
+            super::random_token().unwrap()
+        ));
+        for persistent_profile in [true, false] {
+            let profile = root.join(persistent_profile.to_string());
+            std::fs::create_dir_all(&profile).unwrap();
+            std::fs::write(profile.join("existing-session"), b"test").unwrap();
+            let result = super::Session::launch(super::Opts {
+                chrome: root.join("missing-browser"),
+                profile: profile.clone(),
+                name: "test".into(),
+                role: super::Role::Bot,
+                persistent_profile,
+            })
+            .await;
+            assert!(result.is_err());
+            assert_eq!(profile.exists(), persistent_profile);
+            if persistent_profile {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::read(profile.join("existing-session")).unwrap(),
+                    b"test"
+                );
+                assert_eq!(
+                    std::fs::metadata(&profile).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn data_url_decodes_to_the_png_bytes() {
         // "\x89PNG" is iVBORw==

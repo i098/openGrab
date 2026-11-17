@@ -81,11 +81,10 @@ On tmpfs it took 3 to 7 s.
 Launch, the pinned version, navigation to the Meet link, the injected script, the page-state read, the refusal text and a screenshot.
 The guest name screen and the "ask to join" request were reached only by browsers without `Runtime.enable`, and the host never saw a knock.
 
-## F5. Loading a signed-in session from cookies
+## F5. Historical cookie-import attempt
 
-`p0_exit --cookies <file>` loads a JSON array of CDP cookies into the driver's own profile with
-`Network.setCookies` on the tab session, before the first navigation. The file stays outside the
-repository, mode 600, and is deleted when the run ends. Guest runs are unchanged.
+The following results describe the removed cookie-import implementation.
+Google session copying is no longer permitted or supported.
 
 Measured on 2026-11-13:
 
@@ -98,15 +97,13 @@ Measured on 2026-11-13:
 | The same request with the same jar through `curl` | Redirects to `accounts.google.com/CookieMismatch`. |
 | `https://meet.google.com/` from that Chromium | Redirects to the Meet marketing page. |
 
-The transfer is mechanically sound and the session it carries is not usable: every account in the
-source browser is signed out, so the copied cookies are signed-out cookies. A session needs a
-password or a Google verify prompt, and this task allows neither. The signed-in join is blocked
-until a live session exists in that browser.
+The source browser later showed every account as signed out. These observations do not establish
+when or why its sessions ended. An account list alone does not prove that a session is usable.
 
-Profiles now live under `/dev/shm` when it exists, because a cookie write to a profile on the
-host's main disk stalled the CDP reply past its timeout.
+The replacement is `p0_exit --profile <directory>`. It retains a server-local browser profile at mode 700.
+Temporary profiles still use `/dev/shm` when available and are deleted after the browser exits.
 
 ## Next
 
-A live session must exist in the owner's browser first; then `scripts/p0-exit.sh --cookies <file>`
-runs Join, Chat, Tile, Outsider and the three fake-audio speakers per section 6.1.
+Sign in locally in the persistent profile before running the section 6.1 checks.
+Live tests wait for the verified virtual-phone setup. No new login has started in this resumed task.
