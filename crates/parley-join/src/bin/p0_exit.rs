@@ -117,7 +117,8 @@ fn find_chrome() -> Result<PathBuf> {
         .join("chrome-linux64/chrome"))
 }
 
-/// Profiles live in the temp dir (tmpfs on this host): on a slow disk Chromium stalls page loads past CDP timeouts.
+/// Temporary profiles live in the temp dir (tmpfs on this host): on a slow disk Chromium stalls page loads past CDP timeouts.
+/// The bot uses `--profile` instead when given; it stays where the operator put it.
 fn launch_opts(a: &Args, chrome: &Path, tag: &str, name: &str, role: Role) -> Opts {
     let persistent_profile = matches!(role, Role::Bot) && a.profile.is_some();
     Opts {

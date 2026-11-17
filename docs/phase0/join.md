@@ -52,7 +52,7 @@ Possible causes, none proven: a Google check on guests ("System info will be sen
 - A headed browser on another shared tier reached the password step. One password attempt gave no result. No retry.
 - A one-off driver sign-in (since removed from the crate) used a Workspace account. Google accepted the password and then showed "Verify it's you ... Google sent a notification to your phone. Open the Gmail app, tap Yes on the prompt" (URL path `/v3/signin/challenge/dp`).
   The driver stopped at once. This prompt reached the owner's phone as a side effect of the password step.
-- No Google session existed in the shared cookie store, so none was loaded. No session was pulled from any personal browser.
+- No Google session existed in the shared cookie store, so none was loaded. No session was pulled from any personal browser in these attempts (F5 records a later cookie-copy attempt).
 
 ## F3. `--use-file-for-fake-audio-capture` works (plan row "not tested")
 
@@ -74,7 +74,7 @@ Not proven: that Meet shows each profile as a separate speaker with a speaking i
 
 With `--user-data-dir` on a busy disk (89% full, load average about 95) the first navigation timed out.
 On tmpfs it took 3 to 7 s.
-`p0_exit` keeps the profiles in the temp directory and the driver tolerates a late `Page.navigate` reply.
+`p0_exit` keeps temporary profiles in the temp directory and the driver tolerates a late `Page.navigate` reply. A `--profile` directory stays where the operator put it.
 
 ## Reached with no host
 
