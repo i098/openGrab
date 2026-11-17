@@ -561,6 +561,19 @@ async fn serve(listener: TcpListener, token: String, tx: mpsc::UnboundedSender<C
 mod tests {
     #[tokio::test]
     async fn failed_launch_keeps_persistent_profile_and_removes_temporary_profile() {
+        if std::env::var_os("PARLEY_PROFILE_TEST_CHILD").is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::failed_launch_keeps_persistent_profile_and_removes_temporary_profile",
+                ])
+                .env("PARLEY_PROFILE_TEST_CHILD", "1")
+                .env("DISPLAY", ":999")
+                .status()
+                .unwrap();
+            assert!(result.success());
+            return;
+        }
         let root = std::env::temp_dir().join(format!(
             "parley-profile-test-{}-{}",
             std::process::id(),
