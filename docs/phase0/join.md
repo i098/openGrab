@@ -10,7 +10,7 @@ No account name, e-mail address or cookie appears here.
 | Join kind | Verdict | Why |
 | --- | --- | --- |
 | Guest (no Google account) | **No-go, as tested** | Meet refused every guest with "You can't join this video call". The host was in the call each time and no knock reached the host. |
-| Signed-in bot | **Blocked, no session** | The session was to be loaded from the account owner's browser as cookies. That browser reports every Google account, the Workspace test account included, as "Signed out", so no session existed to load. The section 6.1 signed-in checks did not run. |
+| Signed-in bot | **NOT RUN** | The signed-in join waits on a local sign-in in the persistent `--profile` profile. The section 6.1 checks (Join, Chat, Tile, Outsider, speakers) did not run. The earlier cookie-copy attempt is recorded in F5 as history only. |
 
 Section 6.1 checks that ran: Join (guest) failed. Chat, Tile, Outsider and speakers-in-call did not run, because no run got into a call.
 One part of Phase 0 is proven: Chromium profiles can play a known recording as a microphone (F3).

@@ -54,7 +54,7 @@ Build and test with `blaze` (`blaze test -p parley-join`). `scripts/p0-exit.sh` 
 
 ## Phase 0 findings
 
-See `docs/phase0/join.md`: the guest join is a no-go as tested (Meet refuses every guest), the signed-in join is blocked until the source browser holds a live session, and `--use-file-for-fake-audio-capture` works.
+See `docs/phase0/join.md`: the guest join is a no-go as tested (Meet refuses every guest), the signed-in join waits on a local sign-in in the persistent `--profile` profile (Join, Chat, Tile, Outsider and speaker checks: NOT RUN), and `--use-file-for-fake-audio-capture` works.
 
 ## Limits
 
