@@ -6,17 +6,29 @@ use parley_llm::{
     openai::OpenAiCompatible,
 };
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 /// Serves `status` and `body` to every connection; returns the base URL.
 async fn serve(status: &'static str, content_type: &'static str, body: String) -> String {
+    serve_capture(status, content_type, body, Default::default()).await
+}
+
+/// Like `serve`, and pushes each request body (as JSON) onto `seen`.
+async fn serve_capture(
+    status: &'static str,
+    content_type: &'static str,
+    body: String,
+    seen: Arc<Mutex<Vec<serde_json::Value>>>,
+) -> String {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move {
         loop {
             let (mut sock, _) = l.accept().await.unwrap();
             let body = body.clone();
+            let seen = seen.clone();
             tokio::spawn(async move {
                 // Read request head and body (Content-Length) so the client finishes sending.
                 let mut buf = Vec::new();
@@ -38,6 +50,9 @@ async fn serve(status: &'static str, content_type: &'static str, body: String) -
                     let n = sock.read(&mut tmp).await.unwrap();
                     buf.extend_from_slice(&tmp[..n]);
                 }
+                seen.lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(&buf[head_end..head_end + len]).unwrap());
                 let resp = format!(
                     "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
@@ -219,4 +234,48 @@ async fn anthropic_cut_stream() {
     let got = collect(&anthropic("anthropic_cut.sse").await).await;
     assert_eq!(got.len(), 2);
     assert!(matches!(got[1], Err(LlmError::StreamCut)));
+}
+
+/// Streams one request through a capturing server and returns its JSON body.
+async fn sent_body(anthropic: bool, required_tool: Option<&str>) -> serde_json::Value {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (file, url);
+    if anthropic {
+        file = "anthropic_text.sse";
+        url = serve_capture("200 OK", "text/event-stream", fixture(file), seen.clone()).await;
+    } else {
+        file = "openai_text.sse";
+        url = serve_capture("200 OK", "text/event-stream", fixture(file), seen.clone()).await;
+    }
+    let req = ChatRequest {
+        messages: vec![Message::user("hi")],
+        required_tool: required_tool.map(Into::into),
+        ..Default::default()
+    };
+    let stream = if anthropic {
+        Anthropic::new(url, "k", "m").stream(req).await
+    } else {
+        OpenAiCompatible::new(url, None, "m").stream(req).await
+    };
+    stream.unwrap().collect::<Vec<_>>().await;
+    let v = seen.lock().unwrap()[0].clone();
+    v
+}
+
+#[tokio::test]
+async fn openai_required_tool_sets_tool_choice() {
+    assert_eq!(
+        sent_body(false, Some("t")).await["tool_choice"],
+        json!({"type": "function", "function": {"name": "t"}})
+    );
+    assert!(sent_body(false, None).await.get("tool_choice").is_none());
+}
+
+#[tokio::test]
+async fn anthropic_required_tool_sets_tool_choice() {
+    assert_eq!(
+        sent_body(true, Some("t")).await["tool_choice"],
+        json!({"type": "tool", "name": "t"})
+    );
+    assert!(sent_body(true, None).await.get("tool_choice").is_none());
 }

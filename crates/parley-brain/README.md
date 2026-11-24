@@ -1,7 +1,7 @@
 # parley-brain
 
 A rolling transcript (`Transcript`, lines of speaker, start time in ms, text) and `notes()`.
-`notes()` sends the transcript through any `parley_llm::LlmProvider`. The model answers with one `write_notes` tool call.
+`notes()` sends the transcript through any `parley_llm::LlmProvider`. The model answers with one `write_notes` tool call, and the request requires that tool.
 The result is a summary and action items (text, optional owner).
 A reply with no such tool call is an error, not empty notes.
 

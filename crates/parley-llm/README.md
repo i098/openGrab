@@ -2,7 +2,8 @@
 
 One streaming trait, `LlmProvider`, with two adapters. The trait names no provider.
 
-- `ChatRequest`: system text, messages (text, images, tool calls, tool results) and tool definitions.
+- `ChatRequest`: system text, messages (text, images, tool calls, tool results) tool definitions, and an optional `required_tool` (the name of one tool the model must call).
+  The OpenAI adapter sends it as `tool_choice` `{"type":"function","function":{"name":...}}`; the Anthropic adapter sends `{"type":"tool","name":...}`. Unset, the body has no `tool_choice`.
 - `stream()` returns `Delta` items: `Text`, a complete `ToolCall`, and a last `End(FinishReason)`.
   A body that stops before the end reason gives `LlmError::StreamCut`. A non-2xx answer gives `LlmError::Api`.
   The OpenAI adapter ends with `End(ToolCalls)` when it emitted tool calls, even if the server reports `stop` or sends only `[DONE]`.
