@@ -132,23 +132,25 @@ struct ChatDecoder {
 }
 
 impl ChatDecoder {
-    fn flush_calls(&mut self) -> Result<Vec<Delta>, LlmError> {
-        std::mem::take(&mut self.calls)
-            .into_values()
-            .map(|(id, name, args)| {
-                let arguments = if args.is_empty() {
-                    json!({})
-                } else {
-                    serde_json::from_str(&args)
-                        .map_err(|e| LlmError::Decode(format!("tool arguments: {e}")))?
-                };
-                Ok(Delta::ToolCall {
-                    id,
-                    name,
-                    arguments,
-                })
-            })
-            .collect()
+    fn flush_calls(&mut self, drop_cut: bool) -> Result<Vec<Delta>, LlmError> {
+        let mut out = Vec::new();
+        for (id, name, args) in std::mem::take(&mut self.calls).into_values() {
+            let arguments = if args.is_empty() {
+                json!({})
+            } else {
+                match serde_json::from_str(&args) {
+                    Ok(v) => v,
+                    Err(_) if drop_cut => continue,
+                    Err(e) => return Err(LlmError::Decode(format!("tool arguments: {e}"))),
+                }
+            };
+            out.push(Delta::ToolCall {
+                id,
+                name,
+                arguments,
+            });
+        }
+        Ok(out)
     }
 }
 
@@ -157,7 +159,7 @@ impl Decoder for ChatDecoder {
         if ev.data.trim() == "[DONE]" {
             // Servers that omit finish_reason still end cleanly here.
             self.done = true;
-            let mut out = self.flush_calls()?;
+            let mut out = self.flush_calls(false)?;
             let reason = if out.is_empty() {
                 FinishReason::Stop
             } else {
@@ -201,7 +203,7 @@ impl Decoder for ChatDecoder {
             }
         }
         if let Some(reason) = choice["finish_reason"].as_str() {
-            let calls = self.flush_calls()?;
+            let calls = self.flush_calls(reason == "length")?;
             let has_calls = !calls.is_empty();
             out.extend(calls);
             out.push(Delta::End(match reason {

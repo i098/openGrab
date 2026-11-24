@@ -142,6 +142,24 @@ async fn openai_stop_with_tool_calls_ends_with_tool_calls() {
 }
 
 #[tokio::test]
+async fn openai_length_drops_cut_tool_call() {
+    let got = ok(collect(&openai("openai_tool_length.sse").await).await);
+    assert_eq!(got, vec![Delta::End(FinishReason::Length)]);
+}
+
+#[tokio::test]
+async fn anthropic_max_tokens_drops_cut_tool_call() {
+    let got = ok(collect(&anthropic("anthropic_tool_length.sse").await).await);
+    assert_eq!(got, vec![Delta::End(FinishReason::Length)]);
+}
+
+#[tokio::test]
+async fn anthropic_cut_tool_call_with_other_stop_is_error() {
+    let got = collect(&anthropic("anthropic_tool_cut_tool_use.sse").await).await;
+    assert!(matches!(got.last(), Some(Err(LlmError::Decode(_)))));
+}
+
+#[tokio::test]
 async fn openai_http_error() {
     let url = serve(
         "429 Too Many Requests",

@@ -116,6 +116,7 @@ struct MessagesDecoder {
     /// content block index -> (id, name, argument fragments) for tool_use blocks
     tools: BTreeMap<u64, (String, String, String)>,
     stop: Option<String>,
+    cut: Option<String>,
     done: bool,
 }
 
@@ -158,8 +159,13 @@ impl Decoder for MessagesDecoder {
                     let arguments = if args.is_empty() {
                         json!({})
                     } else {
-                        serde_json::from_str(&args)
-                            .map_err(|e| LlmError::Decode(format!("tool input: {e}")))?
+                        match serde_json::from_str(&args) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.cut = Some(e.to_string());
+                                return Ok(out);
+                            }
+                        }
                     };
                     out.push(Delta::ToolCall {
                         id,
@@ -174,6 +180,13 @@ impl Decoder for MessagesDecoder {
                 }
             }
             "message_stop" => {
+                if let Some(e) = self
+                    .cut
+                    .take()
+                    .filter(|_| self.stop.as_deref() != Some("max_tokens"))
+                {
+                    return Err(LlmError::Decode(format!("tool input: {e}")));
+                }
                 self.done = true;
                 out.push(Delta::End(match self.stop.as_deref() {
                     Some("end_turn") | Some("stop_sequence") | None => FinishReason::Stop,
