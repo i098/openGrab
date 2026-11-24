@@ -50,7 +50,7 @@ The host admits every guest. The script prints one `PASS` or `FAIL` line per che
 `participants.json`, the per-participant fields the page gives the bot), `speakers` (three more
 Chromium profiles, each with `--use-file-for-fake-audio-capture`).
 
-Build and test with `blaze` (`blaze test -p parley-join`). `scripts/p0-exit.sh` falls back to cargo only when blaze is not installed.
+Build and test with `blaze` (`blaze test -p parley-join`). `scripts/p0-exit.sh` uses cargo only, because blaze cannot build `p0_exit`.
 
 ## Phase 0 findings
 
