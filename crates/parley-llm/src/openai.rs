@@ -96,6 +96,9 @@ impl OpenAiCompatible {
                 })
                 .collect();
         }
+        if let Some(n) = &req.required_tool {
+            body["tool_choice"] = json!({"type": "function", "function": {"name": n}});
+        }
         body
     }
 }

@@ -8,7 +8,7 @@ use serde_json::json;
 use std::fmt::Write;
 
 const TOOL_NAME: &str = "write_notes";
-const SYSTEM: &str = "You take notes for a meeting. Read the transcript, then call the write_notes tool once with a short summary and the action items. Use an empty action_items list when there are none.";
+const SYSTEM: &str = "You take notes for a meeting. Read the transcript, then call the write_notes tool once. Give a short summary. Add one action item for each task that a person agreed to do or was asked to do, with that person as the owner.";
 
 /// One utterance. This crate's own type: it does not depend on the STT crate.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +84,7 @@ impl Transcript {
             system: Some(SYSTEM.into()),
             messages: vec![Message::user(self.render())],
             tools: vec![notes_tool()],
+            required_tool: Some(TOOL_NAME.into()),
             ..Default::default()
         };
         let mut s = llm.stream(req).await?;
@@ -114,6 +115,7 @@ fn notes_tool() -> ToolDef {
                 "summary": {"type": "string", "description": "Short summary of the meeting so far."},
                 "action_items": {
                     "type": "array",
+                    "description": "One entry for each task a person agreed to do. Empty only when nobody took a task.",
                     "items": {
                         "type": "object",
                         "properties": {

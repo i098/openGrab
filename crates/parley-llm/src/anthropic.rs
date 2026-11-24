@@ -83,6 +83,9 @@ impl Anthropic {
                 .map(|t| json!({"name": t.name, "description": t.description, "input_schema": t.parameters}))
                 .collect();
         }
+        if let Some(n) = &req.required_tool {
+            body["tool_choice"] = json!({"type": "tool", "name": n});
+        }
         body
     }
 }

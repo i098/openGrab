@@ -72,6 +72,8 @@ pub struct ChatRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDef>,
     pub max_tokens: Option<u32>,
+    /// Name of one tool in `tools` that the model must call.
+    pub required_tool: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
