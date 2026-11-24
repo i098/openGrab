@@ -258,8 +258,7 @@ async fn sent_body(anthropic: bool, required_tool: Option<&str>) -> serde_json::
         OpenAiCompatible::new(url, None, "m").stream(req).await
     };
     stream.unwrap().collect::<Vec<_>>().await;
-    let v = seen.lock().unwrap()[0].clone();
-    v
+    seen.lock().unwrap()[0].clone()
 }
 
 #[tokio::test]
