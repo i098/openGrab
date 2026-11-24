@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Meeting transcript</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 48rem; margin: 0 auto; padding: 1rem; }
+  header { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+  h1 { font-size: 1.2rem; margin: 0 auto 0 0; }
+  #status { color: #555; }
+  button { font: inherit; padding: .3rem .8rem; }
+  #lines { list-style: none; padding: 0; }
+  #lines li { padding: .3rem 0; border-bottom: 1px solid #ddd; }
+  .who { font-weight: 600; }
+  .at { color: #777; font-size: .85rem; margin-left: .5rem; }
+  #ended { display: none; font-weight: 600; padding: 1rem 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Meeting transcript</h1>
+  <span id="status" role="status">Connecting…</span>
+  <button id="pause" type="button">Pause</button>
+  <button id="resume" type="button">Resume</button>
+  <button id="remove" type="button">Remove</button>
+</header>
+<p id="ended">This meeting session was removed. The transcript is deleted.</p>
+<ul id="lines" aria-live="polite"></ul>
+<script>
+"use strict";
+const base = location.pathname.replace(/\/$/, "");
+const $ = (id) => document.getElementById(id);
+const list = $("lines");
+let state = "running";
+
+function addLine(l) {
+  const li = document.createElement("li");
+  const who = document.createElement("span");
+  who.className = "who";
+  who.textContent = l.speaker;
+  const at = document.createElement("span");
+  at.className = "at";
+  at.textContent = new Date(l.at_ms).toLocaleTimeString();
+  const text = document.createElement("div");
+  text.textContent = l.text;
+  li.append(who, at, text);
+  list.append(li);
+}
+
+function setState(s) {
+  state = s;
+  $("status").textContent = { running: "Live", paused: "Paused", removed: "Removed" }[s];
+  $("pause").disabled = s !== "running";
+  $("resume").disabled = s !== "paused";
+  $("remove").disabled = s === "removed";
+  $("ended").style.display = s === "removed" ? "block" : "none";
+  if (s === "removed") list.replaceChildren();
+}
+
+function connect() {
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${base}/ws`);
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === "history") {
+      list.replaceChildren();
+      m.lines.forEach(addLine);
+      setState(m.state);
+    } else if (m.type === "line") {
+      addLine(m);
+    } else if (m.type === "state") {
+      setState(m.state);
+    }
+    if (state !== "removed") scrollTo(0, document.body.scrollHeight);
+  };
+  ws.onclose = () => {
+    if (state === "removed") return;
+    $("status").textContent = "Reconnecting…";
+    setTimeout(connect, 2000);
+  };
+}
+
+for (const a of ["pause", "resume", "remove"]) {
+  $(a).onclick = async () => {
+    if (a === "remove" && !confirm("Remove this meeting session? This cannot be undone.")) return;
+    const r = await fetch(`${base}/${a}`, { method: "POST" });
+    if (r.ok) setState((await r.json()).state);
+  };
+}
+setState("running");
+$("status").textContent = "Connecting…";
+connect();
+</script>
+</body>
+</html>
