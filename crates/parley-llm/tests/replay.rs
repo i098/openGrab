@@ -124,6 +124,15 @@ async fn openai_tool_call() {
 }
 
 #[tokio::test]
+async fn openai_done_without_finish_reason_keeps_tool_calls() {
+    let got = ok(collect(&openai("openai_tool_no_finish.sse").await).await);
+    assert_eq!(
+        got,
+        with_id(tool_expected(FinishReason::ToolCalls), "call_1")
+    );
+}
+
+#[tokio::test]
 async fn openai_http_error() {
     let url = serve(
         "429 Too Many Requests",

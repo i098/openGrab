@@ -131,12 +131,40 @@ struct ChatDecoder {
     done: bool,
 }
 
+impl ChatDecoder {
+    fn flush_calls(&mut self) -> Result<Vec<Delta>, LlmError> {
+        std::mem::take(&mut self.calls)
+            .into_values()
+            .map(|(id, name, args)| {
+                let arguments = if args.is_empty() {
+                    json!({})
+                } else {
+                    serde_json::from_str(&args)
+                        .map_err(|e| LlmError::Decode(format!("tool arguments: {e}")))?
+                };
+                Ok(Delta::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                })
+            })
+            .collect()
+    }
+}
+
 impl Decoder for ChatDecoder {
     fn event(&mut self, ev: SseEvent) -> Result<Vec<Delta>, LlmError> {
         if ev.data.trim() == "[DONE]" {
-            // Servers that omit finish_reason still end cleanly here.
+            // Servers that omit finish_reason still end here; pending calls must not be lost.
             self.done = true;
-            return Ok(vec![Delta::End(FinishReason::Stop)]);
+            let mut out = self.flush_calls()?;
+            let reason = if out.is_empty() {
+                FinishReason::Stop
+            } else {
+                FinishReason::ToolCalls
+            };
+            out.push(Delta::End(reason));
+            return Ok(out);
         }
         let v: Value =
             serde_json::from_str(&ev.data).map_err(|e| LlmError::Decode(e.to_string()))?;
@@ -173,19 +201,7 @@ impl Decoder for ChatDecoder {
             }
         }
         if let Some(reason) = choice["finish_reason"].as_str() {
-            for (id, name, args) in std::mem::take(&mut self.calls).into_values() {
-                let arguments = if args.is_empty() {
-                    json!({})
-                } else {
-                    serde_json::from_str(&args)
-                        .map_err(|e| LlmError::Decode(format!("tool arguments: {e}")))?
-                };
-                out.push(Delta::ToolCall {
-                    id,
-                    name,
-                    arguments,
-                });
-            }
+            out.extend(self.flush_calls()?);
             out.push(Delta::End(match reason {
                 "stop" => FinishReason::Stop,
                 "length" => FinishReason::Length,
