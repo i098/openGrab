@@ -1,7 +1,7 @@
 //! Read a transcript file and one request; print the answer a chosen adapter gives.
 
 use clap::{Parser, ValueEnum};
-use parley_brain::{DEFAULT_NAME, Line, Transcript, find_request};
+use parley_brain::{DEFAULT_NAME, Line, Transcript, find_request, is_recap_request};
 use parley_llm::{LlmProvider, anthropic::Anthropic, openai::OpenAiCompatible};
 use std::path::PathBuf;
 
@@ -52,7 +52,12 @@ async fn run<P: LlmProvider>(
     t: &Transcript,
     q: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("{}", t.answer(&p, q).await?);
+    let out = if is_recap_request(q) {
+        t.recap(&p).await?
+    } else {
+        t.answer(&p, q).await?
+    };
+    println!("{out}");
     Ok(())
 }
 

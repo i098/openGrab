@@ -112,6 +112,12 @@ impl Transcript {
         )?)
     }
 
+    /// The chat text for a recap request: summary and action items from [`Self::notes`],
+    /// at most [`MAX_ANSWER_CHARS`] characters. See [`format_recap`].
+    pub async fn recap<P: LlmProvider>(&self, llm: &P) -> Result<String, BrainError> {
+        Ok(format_recap(&self.notes(llm).await?))
+    }
+
     /// A plain-text answer, at most [`MAX_ANSWER_CHARS`] characters, for a chat message.
     pub async fn answer<P: LlmProvider>(
         &self,
@@ -173,6 +179,44 @@ pub fn find_request<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     (!q.is_empty()).then_some(q)
 }
 
+/// True when the request asks for a recap or a summary. A keyword match, no model call.
+pub fn is_recap_request(request: &str) -> bool {
+    let r = request.to_lowercase();
+    r.contains("recap") || r.contains("summar")
+}
+
+fn take_chars(s: &str, n: usize) -> &str {
+    &s[..s.char_indices().nth(n).map_or(s.len(), |(i, _)| i)]
+}
+
+/// Chat text for the notes, at most [`MAX_ANSWER_CHARS`] characters. The summary is cut
+/// first; every action item line stays unless the items alone are too long.
+pub fn format_recap(notes: &Notes) -> String {
+    let mut items = String::new();
+    for a in &notes.action_items {
+        items.push_str("\n- ");
+        items.push_str(a.text.trim());
+        if let Some(o) = a.owner.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
+            let _ = write!(items, " ({o})");
+        }
+    }
+    let items = if items.is_empty() {
+        "\nNo action items.".to_string()
+    } else {
+        format!("\nAction items:{items}")
+    };
+    let summary = notes.summary.trim();
+    let budget = MAX_ANSWER_CHARS.saturating_sub("Recap: ".len() + items.chars().count());
+    let head = if summary.chars().count() <= budget {
+        format!("Recap: {summary}")
+    } else if budget > 1 {
+        format!("Recap: {}\u{2026}", take_chars(summary, budget - 1))
+    } else {
+        "Recap:".to_string()
+    };
+    take_chars(&format!("{head}{items}"), MAX_ANSWER_CHARS).into()
+}
+
 fn notes_tool() -> ToolDef {
     ToolDef {
         name: TOOL_NAME.into(),
@@ -201,7 +245,65 @@ fn notes_tool() -> ToolDef {
 
 #[cfg(test)]
 mod tests {
-    use super::find_request;
+    use super::{ActionItem, Notes, find_request, format_recap, is_recap_request};
+
+    fn item(text: &str, owner: Option<&str>) -> ActionItem {
+        ActionItem {
+            text: text.into(),
+            owner: owner.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn classifies_recap_requests() {
+        for q in [
+            "recap",
+            "give us a recap",
+            "Summarize the meeting so far",
+            "a SUMMARY please",
+        ] {
+            assert!(is_recap_request(q), "{q}");
+        }
+        for q in ["what did Tom agree to?", "who owns this?"] {
+            assert!(!is_recap_request(q), "{q}");
+        }
+    }
+
+    #[test]
+    fn short_recap_has_summary_and_owners() {
+        let n = Notes {
+            summary: "We shipped.".into(),
+            action_items: vec![item("Send deck", Some("Tom")), item("Book room", None)],
+        };
+        assert_eq!(
+            format_recap(&n),
+            "Recap: We shipped.\nAction items:\n- Send deck (Tom)\n- Book room"
+        );
+    }
+
+    #[test]
+    fn long_summary_is_cut_and_items_kept() {
+        let n = Notes {
+            summary: "é".repeat(2000),
+            action_items: vec![
+                item("Send deck", Some("Tom")),
+                item("Book room", Some("Ann")),
+            ],
+        };
+        let r = format_recap(&n);
+        assert_eq!(r.chars().count(), 500);
+        assert!(r.ends_with("Action items:\n- Send deck (Tom)\n- Book room (Ann)"));
+        assert!(r.contains('\u{2026}'));
+    }
+
+    #[test]
+    fn huge_items_still_fit_one_message() {
+        let n = Notes {
+            summary: "s".into(),
+            action_items: vec![item(&"x".repeat(900), None)],
+        };
+        assert_eq!(format_recap(&n).chars().count(), 500);
+    }
 
     #[test]
     fn finds_requests() {
