@@ -6,13 +6,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 /// Serves `body` as an SSE response to every connection; returns the base URL.
-async fn serve(body: String) -> String {
+/// Each request body is sent on `seen`.
+async fn serve(body: String, seen: tokio::sync::mpsc::UnboundedSender<String>) -> String {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move {
         loop {
             let (mut sock, _) = l.accept().await.unwrap();
-            let body = body.clone();
+            let (body, seen) = (body.clone(), seen.clone());
             tokio::spawn(async move {
                 // Read request head and body (Content-Length) so the client finishes sending.
                 let mut buf = Vec::new();
@@ -34,6 +35,8 @@ async fn serve(body: String) -> String {
                     let n = sock.read(&mut tmp).await.unwrap();
                     buf.extend_from_slice(&tmp[..n]);
                 }
+                seen.send(String::from_utf8_lossy(&buf[head_end..head_end + len]).into_owned())
+                    .ok();
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
@@ -46,13 +49,14 @@ async fn serve(body: String) -> String {
     url
 }
 
-async fn replay(file: &str) -> Result<parley_brain::Notes, BrainError> {
+async fn replay_request(file: &str) -> (Result<parley_brain::Notes, BrainError>, String) {
     let body = std::fs::read_to_string(format!(
         "{}/tests/fixtures/{file}",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap();
-    let llm = OpenAiCompatible::new(serve(body).await, None, "m");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let llm = OpenAiCompatible::new(serve(body, tx).await, None, "m");
     let mut t = Transcript::new();
     // Pushed out of order: the transcript keeps start-time order.
     for (who, ms, text) in [("Bo", 4000, "Fine."), ("Ana", 1000, "Ship Friday?")] {
@@ -63,7 +67,23 @@ async fn replay(file: &str) -> Result<parley_brain::Notes, BrainError> {
         });
     }
     assert_eq!(t.lines()[0].speaker, "Ana");
-    t.notes(&llm).await
+    let notes = t.notes(&llm).await;
+    (notes, rx.recv().await.unwrap())
+}
+
+async fn replay(file: &str) -> Result<parley_brain::Notes, BrainError> {
+    replay_request(file).await.0
+}
+
+/// OpenAI chat-completions contract: `tool_choice` naming a function forces that call.
+#[tokio::test]
+async fn notes_forces_the_write_notes_tool() {
+    let (_, request) = replay_request("notes_items.sse").await;
+    let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(
+        request["tool_choice"],
+        serde_json::json!({"type": "function", "function": {"name": "write_notes"}})
+    );
 }
 
 #[tokio::test]
