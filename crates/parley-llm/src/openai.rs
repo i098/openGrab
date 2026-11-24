@@ -155,7 +155,7 @@ impl ChatDecoder {
 impl Decoder for ChatDecoder {
     fn event(&mut self, ev: SseEvent) -> Result<Vec<Delta>, LlmError> {
         if ev.data.trim() == "[DONE]" {
-            // Servers that omit finish_reason still end here; pending calls must not be lost.
+            // Servers that omit finish_reason still end cleanly here.
             self.done = true;
             let mut out = self.flush_calls()?;
             let reason = if out.is_empty() {
@@ -201,8 +201,11 @@ impl Decoder for ChatDecoder {
             }
         }
         if let Some(reason) = choice["finish_reason"].as_str() {
-            out.extend(self.flush_calls()?);
+            let calls = self.flush_calls()?;
+            let has_calls = !calls.is_empty();
+            out.extend(calls);
             out.push(Delta::End(match reason {
+                "stop" if has_calls => FinishReason::ToolCalls,
                 "stop" => FinishReason::Stop,
                 "length" => FinishReason::Length,
                 "tool_calls" | "function_call" => FinishReason::ToolCalls,
