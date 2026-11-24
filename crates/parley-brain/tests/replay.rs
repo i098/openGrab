@@ -119,3 +119,40 @@ async fn no_tool_call_is_an_error() {
         Err(BrainError::NoToolCall)
     ));
 }
+
+async fn ask(sse: &str, question: &str) -> (String, String) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let llm = OpenAiCompatible::new(serve(sse.into(), tx).await, None, "m");
+    let mut t = Transcript::new();
+    t.push(Line {
+        speaker: "Tom".into(),
+        start_ms: 1000,
+        text: "I will send the deck.".into(),
+    });
+    let a = t.answer(&llm, question).await.unwrap();
+    (a, rx.recv().await.unwrap())
+}
+
+#[tokio::test]
+async fn answer_is_plain_text_from_the_transcript() {
+    let sse = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Tom \"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"sends the deck.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    let (a, req) = ask(sse, "what did Tom agree to?").await;
+    assert_eq!(a, "Tom sends the deck.");
+    let req: serde_json::Value = serde_json::from_str(&req).unwrap();
+    assert!(
+        req.get("tools")
+            .is_none_or(|t| t.as_array().unwrap().is_empty())
+    );
+    let body = req["messages"].to_string();
+    assert!(body.contains("I will send the deck.") && body.contains("what did Tom agree to?"));
+}
+
+#[tokio::test]
+async fn answer_is_cut_at_500_chars_on_a_char_boundary() {
+    let long = "é".repeat(700);
+    let sse = format!(
+        "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{long}\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+    );
+    let (a, _) = ask(&sse, "q").await;
+    assert_eq!(a.chars().count(), 500);
+}
