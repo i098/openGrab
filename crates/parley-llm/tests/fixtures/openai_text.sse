@@ -1,0 +1,10 @@
+data: {"choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+
+data: {"choices":[{"index":0,"delta":{"content":"Hel"}}]}
+
+data: {"choices":[{"index":0,"delta":{"content":"lo"}}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
