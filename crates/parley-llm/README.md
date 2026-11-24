@@ -5,6 +5,9 @@ One streaming trait, `LlmProvider`, with two adapters. The trait names no provid
 - `ChatRequest`: system text, messages (text, images, tool calls, tool results) and tool definitions.
 - `stream()` returns `Delta` items: `Text`, a complete `ToolCall`, and a last `End(FinishReason)`.
   A body that stops before the end reason gives `LlmError::StreamCut`. A non-2xx answer gives `LlmError::Api`.
+  The OpenAI adapter ends with `End(ToolCalls)` when it emitted tool calls, even if the server reports `stop` or sends only `[DONE]`.
+  When the model stops on its token limit in the middle of a tool call, the adapter drops that incomplete call and ends with `End(Length)`.
+  A cut tool call with any other end reason gives `LlmError::Decode`.
 
 ## Configure
 
