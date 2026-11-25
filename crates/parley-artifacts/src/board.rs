@@ -38,6 +38,7 @@ const STROKE: &str = "#1e1e1e";
 const NODE_FILL: &str = "#a5d8ff";
 const UPDATED: i64 = 1_700_000_000_000;
 const FONT_FAMILY: i64 = 5;
+const MAX_LABEL_WIDTH: f64 = 100.0;
 
 /// A board as the LLM names it: no coordinates.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,18 +350,21 @@ impl Board {
             {
                 let (mx, my) = label_anchor(&route);
                 let mask = label_width(label);
+                let height = 20.0 * label_lines(label);
                 arrow_bound.push(json!({"type": "text", "id": format!("edge-text:{i}")}));
-                out.push(bound_text(
+                let mut text = bound_text(
                     &format!("edge-text:{i}"),
                     label,
                     mx - mask / 2.0,
-                    my - 20.0,
+                    my - height,
                     mask,
-                    20.0,
+                    height,
                     16,
                     Some(format!("edge:{i}")),
                     Vec::new(),
-                ));
+                );
+                text["autoResize"] = json!(false);
+                out.push(text);
             }
             arrow.insert("boundElements".into(), Value::Array(arrow_bound));
             out.push(Value::Object(arrow));
@@ -519,9 +523,14 @@ fn crosses(a: (f64, f64), b: (f64, f64), n: &Placed) -> bool {
     t0 <= t1
 }
 
-/// Width of the label mask in pixels at font size 16: about 10 px a character, plus padding.
+/// Width of the label mask in pixels at font size 16: about 10 px a character, plus padding, capped so a long label wraps instead of hiding the shaft.
 fn label_width(label: &str) -> f64 {
-    label.chars().count() as f64 * 10.0 + 16.0
+    (label.chars().count() as f64 * 10.0 + 16.0).min(MAX_LABEL_WIDTH)
+}
+
+/// Lines a label needs at the capped mask width.
+fn label_lines(label: &str) -> f64 {
+    ((label.chars().count() as f64 * 10.0 + 16.0) / MAX_LABEL_WIDTH).ceil()
 }
 
 /// Middle of the longest segment, where the label mask hides the least of the shaft.
@@ -1142,29 +1151,45 @@ mod tests {
 
     #[test]
     fn a_label_leaves_the_arrow_shaft_visible() {
+        let labels = [
+            "ready",
+            "ok",
+            "a very long label that would hide the whole arrow shaft",
+        ];
         let elements = chain(
             &[
-                ("a", "b", Some("ready")),
-                ("b", "c", Some("ok")),
-                ("a", "c", Some("skip")),
+                ("a", "b", Some(labels[0])),
+                ("b", "c", Some(labels[1])),
+                ("a", "c", Some(labels[2])),
             ],
             &["a", "b", "c"],
         );
-        for i in 0..3 {
+        for (i, label) in labels.iter().enumerate() {
             let arrow = elements
                 .iter()
                 .find(|e| e["id"] == format!("edge:{i}"))
                 .unwrap();
-            let points = abs_points(arrow);
-            let longest = points
+            let text = elements
+                .iter()
+                .find(|e| e["id"] == format!("edge-text:{i}"))
+                .unwrap();
+            assert_eq!(text["text"], *label);
+            let mask_w = text["width"].as_f64().unwrap();
+            let mask_h = text["height"].as_f64().unwrap();
+            let longest = abs_points(arrow)
                 .windows(2)
-                .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
-                .fold(0.0, f64::max);
+                .map(|w| (w[1].0 - w[0].0, w[1].1 - w[0].1))
+                .max_by(|a, b| a.0.hypot(a.1).total_cmp(&b.0.hypot(b.1)))
+                .unwrap();
+            let (shaft, mask) = if longest.0.abs() >= longest.1.abs() {
+                (longest.0.abs(), mask_w)
+            } else {
+                (longest.1.abs(), mask_h)
+            };
             // The label mask sits on the middle of the longest segment. Leave room for a 40 px move.
-            let mask = label_width(["ready", "ok", "skip"][i]);
             assert!(
-                longest >= mask + 2.0 * 24.0 + 40.0,
-                "edge {i} shaft {longest}"
+                shaft >= mask + 2.0 * 24.0 + 40.0,
+                "edge {i} shaft {shaft} mask {mask}"
             );
         }
     }
