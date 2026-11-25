@@ -303,7 +303,10 @@ async fn run(
     let mut shown = SessionState::Running;
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
 
+    let (mut frames, mut peak, mut report) = (0u32, 0f64, Instant::now());
     loop {
+        // Meet can replace the side panel by itself, and the page script reads chat lines only while the chat is open.
+        let _ = bot.open_chat().await;
         while let Ok(text) = out_rx.try_recv() {
             if !bot.post_chat(&text).await.unwrap_or(false) {
                 eprintln!("a chat line did not show in the call");
@@ -342,8 +345,16 @@ async fn run(
             }
             e = bot.next_event(Duration::from_millis(500)) => e,
         };
+        if report.elapsed() > Duration::from_secs(30) {
+            eprintln!(
+                "audio: {frames} frames in the last 30 s, loudest {peak:.0} (speech starts at 100)"
+            );
+            (frames, peak, report) = (0, 0.0, Instant::now());
+        }
         match event {
             Some(CallEvent::Audio(f)) if state == SessionState::Running => {
+                frames += 1;
+                peak = peak.max(f64::from(rms(&f.pcm)));
                 let _ = audio_tx.send((f.track, f.pcm));
             }
             Some(CallEvent::Page(PageMsg::Speaking { names, .. })) => speaking.seen(names),
@@ -353,6 +364,7 @@ async fn run(
                 tokio::spawn(handle_request(ctx.clone(), text));
             }
             Some(CallEvent::Page(PageMsg::Log { msg })) => eprintln!("page: {msg}"),
+            Some(CallEvent::Page(PageMsg::Track { .. })) => eprintln!("audio track found"),
             _ => {}
         }
     }

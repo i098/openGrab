@@ -86,7 +86,6 @@
   setInterval(draw, 500);
   const tileStream = canvas.captureStream(5);
 
-  let mic = null; // the silent microphone of the bot: `say()` plays into it
   if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
     const real = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     navigator.mediaDevices.getUserMedia = async (c) => {
@@ -98,7 +97,7 @@
         } else {
           const ctx = new AudioContext();
           const dest = ctx.createMediaStreamDestination(); // silent mic
-          mic = { ctx, dest };
+          (window.__parleyMics = window.__parleyMics || []).push({ ctx, dest });
           out.addTrack(dest.stream.getAudioTracks()[0]);
         }
       }
@@ -168,6 +167,20 @@ registerProcessor("parley-pcm",P)`;
     Object.setPrototypeOf(Hooked, Orig);
     window.RTCPeerConnection = Hooked;
   }
+
+  // A page that got this script after Meet had made its connections (a chosen `authuser=` account) never fires the
+  // hook above for them, so also tap the remote streams that Meet's own media elements already play.
+  setInterval(() => {
+    for (const el of document.querySelectorAll("audio, video")) {
+      const s = el.srcObject;
+      if (!(s instanceof MediaStream)) continue;
+      for (const t of s.getAudioTracks()) {
+        if (t.readyState !== "live" || seenTracks.has(t.id)) continue;
+        seenTracks.add(t.id);
+        tap(t, s).catch((x) => log(`tap failed: ${x}`));
+      }
+    }
+  }, 1000);
 
   // ---- roster and speaking indicators ------------------------------------
   const tileName = (el) => {
@@ -363,16 +376,23 @@ registerProcessor("parley-pcm",P)`;
     takeAudio: () => audioQueue.splice(0).map(b64),
     // Play a WAV (array of bytes) into the silent microphone: attach mode has no fake microphone. Returns seconds.
     say: async (bytes) => {
-      if (!mic) throw new Error("no microphone yet");
-      const buf = await mic.ctx.decodeAudioData(new Uint8Array(bytes).buffer);
-      await mic.ctx.resume();
-      const src = mic.ctx.createBufferSource();
-      src.buffer = buf;
-      src.connect(mic.dest);
-      src.start();
-      return buf.duration;
+      // Play into every microphone the page made: Meet may be sending any of them.
+      const mics = window.__parleyMics || [];
+      if (!mics.length) throw new Error("no microphone yet");
+      let seconds = 0;
+      for (const m of mics) {
+        const buf = await m.ctx.decodeAudioData(new Uint8Array(bytes).buffer);
+        await m.ctx.resume();
+        const src = m.ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(m.dest);
+        src.start();
+        seconds = buf.duration;
+      }
+      return seconds;
     },
     chatOpen: chatPanelOpen,
+    chatReady: () => chatPanelOpen() && !!q1(S.chatComposer),
     noteSent: (text) => sentLines.add(norm(text)),
     chatCount: (text) => chatLines().filter((l) => l === norm(text)).length,
     setTile: (s) => {

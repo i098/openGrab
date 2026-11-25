@@ -41,6 +41,9 @@ struct Args {
     question: String,
     #[arg(long, default_value = "start a doc for the launch plan")]
     doc_request: String,
+    /// Seconds to wait for the first transcript line on the page (the first speech model load is slow).
+    #[arg(long, default_value_t = 1500)]
+    transcript_timeout: u64,
     /// Seconds to wait for each answer (a local model can be slow).
     #[arg(long, default_value_t = 850)]
     answer_timeout: u64,
@@ -108,22 +111,16 @@ impl PageTab {
             .unwrap_or_default()
     }
 
-    /// A real mouse click on the element's centre.
+    /// Click an element of the meeting page (our own page, so a script click is a real one).
+    /// Click a button that asks `confirm()`: a dialog would block every page command, so the page answers yes itself.
+    async fn click_and_confirm(&self, selector: &str) -> Result<()> {
+        self.eval("window.confirm = () => true").await?;
+        self.click(selector).await
+    }
+
     async fn click(&self, selector: &str) -> Result<()> {
-        let js = format!(
-            "(() => {{ const r = document.querySelector({}).getBoundingClientRect(); return {{x: r.x + r.width / 2, y: r.y + r.height / 2}} }})()",
-            Value::from(selector)
-        );
-        let p = self.eval(&js).await?;
-        for (ty, buttons) in [("mouseMoved", 0), ("mousePressed", 1), ("mouseReleased", 0)] {
-            self.cdp
-                .call(
-                    Some(&self.session),
-                    "Input.dispatchMouseEvent",
-                    json!({"type": ty, "x": p["x"], "y": p["y"], "button": "left", "buttons": buttons, "clickCount": 1}),
-                )
-                .await?;
-        }
+        let js = format!("document.querySelector({}).click()", Value::from(selector));
+        self.eval(&js).await?;
         Ok(())
     }
 
@@ -139,11 +136,18 @@ impl PageTab {
 async fn wait_chat(host: &mut Session, secs: u64, want: impl Fn(&str) -> bool) -> Option<String> {
     let end = Instant::now() + Duration::from_secs(secs);
     while Instant::now() < end {
+        // Meet can replace the side panel by itself; the page script reads chat lines only while the chat is open.
+        let _ = host.open_chat().await;
         if let Some(CallEvent::Page(PageMsg::Chat { text, .. })) =
             host.next_event(Duration::from_secs(1)).await
-            && want(&text)
         {
-            return Some(text);
+            println!(
+                "host sees chat: {}",
+                text.chars().take(160).collect::<String>()
+            );
+            if want(&text) {
+                return Some(text);
+            }
         }
     }
     None
@@ -184,7 +188,11 @@ async fn main() -> Result<()> {
         .await?;
     if r.outcome != Outcome::Admitted {
         host.leave().await?;
-        bail!("the host tab did not reach the call: {:?}", r.outcome);
+        bail!(
+            "the host tab did not reach the call: {:?}; page: {:?}",
+            r.outcome,
+            r.last_state
+        );
     }
     host.open_chat().await?;
     println!("host is in the call");
@@ -224,6 +232,12 @@ async fn main() -> Result<()> {
     ok &= verdict(joined, "join", "the bot reached the call");
 
     let notice = wait_chat(&mut host, 120, |t| t.contains(&page_url)).await;
+    if notice.is_none() {
+        let dump: Value = host
+            .eval("({phase: __parley.state().phase, chatOpen: __parley.chatOpen(), media: __parley.media(), chat: __parley.chatText ? 1 : 0, body: document.body.innerText.slice(-600)})")
+            .await?;
+        println!("host page: {dump}");
+    }
     ok &= verdict(
         notice.is_some(),
         "notice",
@@ -234,9 +248,21 @@ async fn main() -> Result<()> {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     host.set_mic(true).await?;
-    let secs = host.say(&wav).await?;
+    // The call asks for the microphone a moment after the unmute click.
+    let mut tries = 0;
+    let secs = loop {
+        match host.say(&wav).await {
+            Ok(s) => break s,
+            Err(e) if tries < 15 => {
+                tries += 1;
+                eprintln!("say: {e}; retry {tries}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    };
     println!("host plays {secs:.1} s of speech into the call");
-    let heard = poll(60 + secs as u64, || async {
+    let heard = poll(a.transcript_timeout + secs as u64, || async {
         !page.text("#lines li").await.is_empty()
     })
     .await;
@@ -280,7 +306,7 @@ async fn main() -> Result<()> {
         ),
     );
 
-    page.click("#remove").await?;
+    page.click_and_confirm("#remove").await?;
     let left = tokio::time::timeout(Duration::from_secs(90), child.wait()).await;
     ok &= verdict(
         matches!(&left, Ok(Ok(s)) if s.success()),
