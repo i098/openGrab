@@ -21,9 +21,11 @@ type El = {
   groupIds?: string[] | null;
   boundElements?: { id: string; type: string }[] | null;
   containerId?: string | null;
+  text?: string;
   startBinding?: { elementId: string } | null;
   endBinding?: { elementId: string } | null;
   points?: number[][] | null;
+  roundness?: { type: number } | null;
   isDeleted?: boolean;
 };
 type Binding = { id: string; type: string };
@@ -99,43 +101,45 @@ function check(name: string, ok: boolean, reason: string) {
 const groupIds = [...new Set(restored.flatMap((el) => el.groupIds ?? []))];
 check(
   "groups",
-  groupIds.length > 0 &&
-    groupIds.every((groupId) => {
-      const members = rects.filter((el) => (el.groupIds ?? []).includes(groupId));
-      if (members.length === 0 || new Set(members.map((m) => m.x)).size !== 1) return false;
-      const top = Math.min(...members.map((m) => m.y));
-      const bottom = Math.max(...members.map((m) => m.y));
-      return !rects.some((r) => !members.includes(r) && r.x === members[0].x && r.y > top && r.y < bottom);
-    }),
+  groupIds.every((groupId) => {
+    const members = rects.filter((el) => (el.groupIds ?? []).includes(groupId));
+    if (members.length === 0 || new Set(members.map((m) => m.x)).size !== 1) return false;
+    const top = Math.min(...members.map((m) => m.y));
+    const bottom = Math.max(...members.map((m) => m.y));
+    return !rects.some((r) => !members.includes(r) && r.x === members[0].x && r.y > top && r.y < bottom);
+  }),
   "a group is empty, or its nodes are not adjacent in one column",
 );
 
 // Move the first node, with its bound text and the ends of its arrows, in the restored scene.
 const node = rects[0];
-const text = texts.find((t) => t.containerId === node.id);
-if (!text) throw new Error(`node ${node.id} has no bound text`);
-for (const el of [node, text]) {
-  el.x += MOVE.x;
-  el.y += MOVE.y;
-}
-for (const arrow of arrows) {
-  const points = arrow.points ?? [];
-  if (arrow.startBinding?.elementId === node.id) {
-    arrow.x += MOVE.x;
-    arrow.y += MOVE.y;
-    for (const point of points.slice(1)) {
-      point[0] -= MOVE.x;
-      point[1] -= MOVE.y;
+const text = node && texts.find((t) => t.containerId === node.id);
+check("moveTarget", Boolean(node && text), "there is no node with bound text to move");
+if (node && text) {
+  for (const el of [node, text]) {
+    el.x += MOVE.x;
+    el.y += MOVE.y;
+  }
+  for (const arrow of arrows) {
+    const points = arrow.points ?? [];
+    if (points.length < 2) continue;
+    if (arrow.startBinding?.elementId === node.id) {
+      arrow.x += MOVE.x;
+      arrow.y += MOVE.y;
+      for (const point of points.slice(1)) {
+        point[0] -= MOVE.x;
+        point[1] -= MOVE.y;
+      }
     }
+    if (arrow.endBinding?.elementId === node.id) {
+      points[points.length - 1][0] += MOVE.x;
+      points[points.length - 1][1] += MOVE.y;
+    }
+    const xs = points.map((p) => p[0]);
+    const ys = points.map((p) => p[1]);
+    arrow.width = Math.max(...xs) - Math.min(...xs);
+    arrow.height = Math.max(...ys) - Math.min(...ys);
   }
-  if (arrow.endBinding?.elementId === node.id) {
-    points[points.length - 1][0] += MOVE.x;
-    points[points.length - 1][1] += MOVE.y;
-  }
-  const xs = points.map((p) => p[0]);
-  const ys = points.map((p) => p[1]);
-  arrow.width = Math.max(...xs) - Math.min(...xs);
-  arrow.height = Math.max(...ys) - Math.min(...ys);
 }
 
 check(
@@ -146,13 +150,14 @@ check(
 );
 check(
   "visible",
-  restored.every((el) => !el.isDeleted),
-  "restore marked an element deleted",
+  restored.every((el) => !el.isDeleted) && texts.every((el) => Boolean(el.text?.trim())),
+  "restore returned a deleted element or a blank label",
 );
 check(
   "shapes",
   restored.every((el) =>
     ["rectangle", "arrow", "text"].includes(el.type) &&
+    (el.type !== "rectangle" || el.roundness == null) &&
     [el.x, el.y, el.width, el.height].every((n) => typeof n === "number" && Number.isFinite(n)) &&
     el.width >= 0 && el.height >= 0
   ),
@@ -191,14 +196,34 @@ check(
   "an arrow end is not on the outline of its bound rectangle",
 );
 
+const textLinks = (el: El | undefined) => (el?.boundElements ?? [])
+  .filter(({ type }) => type === "text")
+  .map(({ id }) => id)
+  .sort();
 check(
   "textsBound",
-  texts.every((text) => {
-    if (text.containerId == null) return true;
-    const container = map.get(text.containerId);
-    return container !== undefined && bound(container, text.id, "text");
-  }),
-  "a bound text has no container, or the container does not name it",
+  restored.every((el, i) => {
+    const links = textLinks(el);
+    const before = textLinks(raw[i]);
+    return (el.containerId ?? null) === (raw[i]?.containerId ?? null) &&
+      links.length === before.length &&
+      links.every((id, j) => {
+        const label = map.get(id);
+        return id === before[j] && label?.type === "text" && label.containerId === el.id;
+      });
+  }) &&
+    rects.every((rect) => bound(rect, `text:${rect.id.slice("node:".length)}`, "text")) &&
+    texts.every((label) => {
+      if (label.id.startsWith("label:")) {
+        return label.containerId == null && label.groupIds?.includes(`group:${label.id.slice("label:".length)}`);
+      }
+      const match = /^(edge-)?text:([\s\S]*)$/.exec(label.id);
+      if (!match) return false;
+      const container = map.get(`${match[1] ? "edge" : "node"}:${match[2]}`);
+      return container?.type === (match[1] ? "arrow" : "rectangle") &&
+        label.containerId === container.id && bound(container, label.id, "text");
+    }),
+  "a node or edge lost a text binding, or a standalone label has no group",
 );
 
 check(
@@ -211,14 +236,60 @@ check(
   "two node rectangles overlap",
 );
 
-const svg = await exportToSvg({
-  elements: restored as unknown as ExcalidrawElement[],
-  appState: { exportBackground: true, viewBackgroundColor: "#ffffff" },
-  exportPadding: 40,
-  skipInliningFonts: true,
-});
-const png = new Uint8Array(new Resvg(svg.outerHTML, { fitTo: { mode: "original" } }).render().asPng());
-check("png", png.length > 0 && png[0] === 0x89 && png[1] === 0x50, "PNG export is empty or not a PNG");
+let png = new Uint8Array();
+if (reasons.length === 0) {
+  const svg = await exportToSvg({
+    elements: restored as unknown as ExcalidrawElement[],
+    appState: { exportBackground: true, viewBackgroundColor: "#ffffff" },
+    exportPadding: 40,
+    skipInliningFonts: true,
+  });
+  const expectedLines = texts.flatMap((el) => el.text!.replace(/\r\n?/g, "\n").split("\n"))
+    .filter((line) => line.trim()).sort();
+  const labelLines = Array.from(svg.querySelectorAll("text")).filter((el) => el.textContent?.trim());
+  labelLines.forEach((el, i) => {
+    el.setAttribute("id", `board-label-${i}`);
+    el.setAttribute("font-family", "KaTeX_SansSerif");
+  });
+  const renderer = new Resvg(svg.outerHTML, {
+    font: {
+      loadSystemFonts: false,
+      fontFiles: [require.resolve("katex/dist/fonts/KaTeX_SansSerif-Regular.ttf")],
+      defaultFontFamily: "KaTeX_SansSerif",
+    },
+  });
+  const outlines = new win.DOMParser().parseFromString(renderer.toString(), "image/svg+xml");
+  const renderedLines = labelLines.map((el) => el.textContent).sort();
+  check(
+    "pngLabels",
+    expectedLines.length === renderedLines.length &&
+      expectedLines.every((line, i) => line === renderedLines[i]) &&
+      labelLines.every((_, i) => Boolean(outlines.querySelector(`#board-label-${i} path[d]`))),
+    "a label is missing from the rasterizer input or has no glyph outlines",
+  );
+  if (reasons.length === 0) {
+    png = new Uint8Array(renderer.render().asPng());
+    check("png", png[0] === 0x89 && png[1] === 0x50, "PNG export is empty or not a PNG");
+  }
+}
+
+const report = {
+  ok: Object.values(checks).every(Boolean),
+  checks,
+  reasons,
+  moved: { id: node?.id, text_id: text?.id },
+  counts: {
+    elements: restored.length,
+    nodes: rects.length,
+    edges: arrows.length,
+    groups: groupIds.length,
+    png_bytes: png.length,
+  },
+};
+if (!report.ok) {
+  console.log(JSON.stringify(report));
+  process.exit(1);
+}
 
 // Write the checked scene itself. JSON drops the undefined fields restore leaves behind.
 const edited = JSON.parse(JSON.stringify(restored));
@@ -228,19 +299,4 @@ ydoc.transact(() => {
 });
 await Bun.write(outPath, Y.encodeStateAsUpdate(ydoc));
 await Bun.write(pngPath, png);
-
-const report = {
-  ok: Object.values(checks).every(Boolean),
-  checks,
-  reasons,
-  moved: { id: node.id, text_id: text.id },
-  counts: {
-    elements: restored.length,
-    nodes: rects.length,
-    edges: arrows.length,
-    groups: groupIds.length,
-    png_bytes: png.length,
-  },
-};
 console.log(JSON.stringify(report));
-if (!report.ok) process.exit(1);

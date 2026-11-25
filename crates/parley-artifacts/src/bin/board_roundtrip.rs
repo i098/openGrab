@@ -161,8 +161,6 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         eprintln!("bun: {}", String::from_utf8_lossy(&run.stderr));
     }
 
-    let back = BoardDoc::from_update(&fs::read(&output)?)?.elements()?;
-
     let mut ok = true;
     let mut check = |name: &str, passed: bool| {
         println!("{name}: {}", if passed { "ok" } else { "FAILED" });
@@ -173,11 +171,17 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
     for (name, value) in report["checks"].as_object().into_iter().flatten() {
         check(&format!("web {name}"), value == &Value::Bool(true));
     }
-    check("web ok", report["ok"] == Value::Bool(true));
+    let web_ok = report["ok"] == Value::Bool(true);
+    check("web ok", web_ok);
     check("bun exit", run.status.success());
     for reason in report["reasons"].as_array().into_iter().flatten() {
         println!("bun: {}", reason.as_str().unwrap_or_default());
     }
+    if !web_ok || !run.status.success() {
+        return Ok(false);
+    }
+
+    let back = BoardDoc::from_update(&fs::read(&output)?)?.elements()?;
     check(
         "web node count",
         report["counts"]["nodes"].as_u64() == Some(board.nodes.len() as u64),
@@ -210,13 +214,17 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         close(moved["x"].as_f64(), Some(expected.0))
             && close(moved["y"].as_f64(), Some(expected.1)),
     );
-    check("bound text exists", element(&before, text_id).is_ok());
+    check(
+        "moved text belongs to moved node",
+        moved_before["type"] == "rectangle" && element(&before, text_id)?["containerId"] == moved_id,
+    );
 
     let mut arrows_kept = true;
     let mut ends_followed = true;
     let mut groups_kept = true;
     let mut others_kept = true;
     let mut texts_kept = true;
+    let mut text_bindings_kept = true;
     for (old, new) in before.iter().zip(back.iter()) {
         let id = old["id"].as_str().unwrap_or_default();
         let shift = |bound: &Value| {
@@ -254,12 +262,16 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             texts_kept &= old["text"] == new["text"]
                 && old["originalText"] == new["originalText"]
                 && old["fontSize"] == new["fontSize"];
+            text_bindings_kept &= old["containerId"] == new["containerId"];
+        } else {
+            text_bindings_kept &= old["boundElements"] == new["boundElements"];
         }
         groups_kept &= old["groupIds"] == new["groupIds"];
     }
     check("arrow bindings kept", arrows_kept);
     check("arrow ends followed the node", ends_followed);
     check("text content kept", texts_kept);
+    check("text bindings kept", text_bindings_kept);
     check("group ids kept", groups_kept);
     check("nodes and texts at expected positions", others_kept);
     check(

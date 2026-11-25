@@ -161,7 +161,7 @@ impl Board {
                 }
             }
         }
-        let mut layer = vec![0u32; n];
+        let mut layer = vec![0usize; n];
         for _ in 0..n {
             let mut changed = false;
             for &(from, to) in &forward {
@@ -175,19 +175,6 @@ impl Board {
                 break;
             }
         }
-        let layer: Vec<_> = column.into_iter().map(|i| layer[i]).collect();
-
-        // Dense renumbering: empty columns are removed and the order of layers is kept.
-        let mut levels: Vec<u32> = layer.clone();
-        levels.sort_unstable();
-        levels.dedup();
-        let dense: HashMap<u32, u32> = levels
-            .iter()
-            .enumerate()
-            .map(|(i, l)| (*l, i as u32))
-            .collect();
-        let layer: Vec<u32> = layer.iter().map(|l| dense[l]).collect();
-
         // Within a column, group members stay adjacent.
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by(|a, b| {
@@ -200,7 +187,7 @@ impl Board {
             key(*a).cmp(&key(*b))
         });
 
-        let mut rows: Vec<usize> = vec![0; dense.len()];
+        let mut rows = vec![0; layer.iter().max().map_or(0, |rank| rank + 1)];
         let mut placed = vec![
             Placed {
                 id: String::new(),
@@ -212,7 +199,7 @@ impl Board {
             n
         ];
         for i in order {
-            let column = layer[i] as usize;
+            let column = layer[column[i]];
             let row = rows[column];
             rows[column] += 1;
             placed[i] = Placed {
@@ -291,7 +278,6 @@ impl Board {
                 NODE_FILL,
             );
             rect.insert("groupIds".into(), json!(group_ids.clone()));
-            rect.insert("roundness".into(), json!({"type": 3}));
             rect.insert(
                 "boundElements".into(),
                 Value::Array(bound.remove(node.id.as_str()).unwrap_or_default()),
@@ -338,7 +324,7 @@ impl Board {
             arrow.insert("endArrowhead".into(), json!("arrow"));
             arrow.insert("elbowed".into(), json!(false));
             let mut arrow_bound = Vec::new();
-            if let Some(label) = &edge.label {
+            if let Some(label) = edge.label.as_deref().filter(|label| !label.trim().is_empty()) {
                 arrow_bound.push(json!({"type": "text", "id": format!("edge-text:{i}")}));
                 out.push(bound_text(
                     &format!("edge-text:{i}"),
@@ -385,6 +371,9 @@ impl Board {
             if !ids.insert(node.id.as_str()) {
                 return Err(Error::Invalid(format!("duplicate node id {:?}", node.id)));
             }
+            if node.label.trim().is_empty() {
+                return Err(Error::Invalid(format!("node {:?} has a blank label", node.id)));
+            }
         }
         for edge in &self.edges {
             if edge.from == edge.to {
@@ -404,6 +393,9 @@ impl Board {
         for group in &self.groups {
             if !groups.insert(group.id.as_str()) {
                 return Err(Error::Invalid(format!("duplicate group id {:?}", group.id)));
+            }
+            if group.label.trim().is_empty() {
+                return Err(Error::Invalid(format!("group {:?} has a blank label", group.id)));
             }
             if group.members.is_empty() {
                 return Err(Error::Invalid(format!(
@@ -821,7 +813,18 @@ mod tests {
     fn groups_need_a_member_but_not_two() {
         let mut board = sample();
         board.groups[0].members.truncate(1);
-        assert!(board.layout().is_ok());
+        let elements = board.elements().unwrap();
+        for id in ["node:a", "label:input"] {
+            let element = elements.iter().find(|e| e["id"] == id).unwrap();
+            assert_eq!(element["groupIds"], json!(["group:input"]));
+        }
+        assert!(!elements
+            .iter()
+            .find(|e| e["id"] == "node:b")
+            .unwrap()["groupIds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("group:input")));
         board.groups[0].members.clear();
         assert!(board.layout().is_err());
     }
@@ -878,6 +881,27 @@ mod tests {
         let mut board = sample();
         board.edges[0].to = "zz".into();
         assert!(board.layout().is_err());
+    }
+
+    #[test]
+    fn blank_required_labels_are_rejected() {
+        let mut board = sample();
+        board.nodes[0].label = " \t\n".into();
+        assert!(matches!(board.elements(), Err(Error::Invalid(_))));
+
+        let mut board = sample();
+        board.groups[0].label = "".into();
+        assert!(matches!(board.elements(), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn blank_optional_label_emits_neither_text_nor_binding() {
+        let mut board = sample();
+        board.edges[2].label = Some(" \t\n".into());
+        let elements = board.elements().unwrap();
+        assert!(!elements.iter().any(|e| e["id"] == "edge-text:2"));
+        let arrow = elements.iter().find(|e| e["id"] == "edge:2").unwrap();
+        assert_eq!(arrow["boundElements"], json!([]));
     }
 
     #[test]
