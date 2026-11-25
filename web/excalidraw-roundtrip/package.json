@@ -1,0 +1,13 @@
+{
+  "name": "excalidraw-roundtrip",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@excalidraw/excalidraw": "^0.18.1",
+    "@napi-rs/canvas": "^1.2.0",
+    "@resvg/resvg-js": "^2.6.2",
+    "happy-dom": "^15.11.0",
+    "katex": "0.16.47",
+    "yjs": "^13.6.0"
+  }
+}
