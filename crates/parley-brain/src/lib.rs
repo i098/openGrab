@@ -7,7 +7,9 @@ use serde::Deserialize;
 use serde_json::json;
 use std::fmt::Write;
 
+mod board;
 mod doc;
+pub use board::{BOARD_CREATE, MAX_NODES};
 pub use doc::{DOC_APPEND, DOC_CREATE};
 
 const TOOL_NAME: &str = "write_notes";
@@ -52,6 +54,8 @@ pub enum BrainError {
     BadNotes(#[from] serde_json::Error),
     #[error("rejected doc tool call: {0}")]
     BadDocCall(String),
+    #[error("rejected board tool call: {0}")]
+    BadBoardCall(String),
 }
 
 /// Ordered utterances, kept in start-time order.
