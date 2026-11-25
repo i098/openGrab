@@ -32,7 +32,7 @@ struct Args {
     /// Persistent bot profile outside the repository. Sign in once before running the checks.
     #[arg(long)]
     profile: Option<PathBuf>,
-    /// Attach the bot to a running Chromium with this remote-debugging port. It opens its own tab and never closes the browser.
+    /// Local remote-debugging port. See the driver README for attached tab ownership and cleanup.
     #[arg(long)]
     attach: Option<u16>,
     #[arg(long, default_value_t = 10)]

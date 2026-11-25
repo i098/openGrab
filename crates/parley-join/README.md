@@ -1,30 +1,33 @@
 # parley-join
 
-Phase 0 spike: a Rust driver that starts a pinned Chromium, opens a Google Meet
-link as a guest, and gets audio, chat, roster and a camera tile through one injected page script.
+Phase 0 spike: a Rust driver that opens Google Meet and gets audio, chat, roster data, and a camera tile through one page script.
 The driver talks to Chromium through a thin CDP client (`src/cdp.rs`) and does not enable the CDP `Runtime`
 domain, because Meet refuses a guest whose tab has that domain on (see the findings). The driver does not hide that it is automated.
-Use `--profile <directory>` for a persistent bot profile outside the repository (new, empty or an existing Chromium profile).
-Sign in locally in that profile before running the checks. The driver keeps it at mode 700.
-Without this option, the driver deletes its temporary profile when it exits.
+To keep a sign-in between browser launches, use `--profile <directory>` outside the repository.
+Use a new or empty directory, or an existing Chromium profile.
+The driver rejects other paths without changing them.
+Sign in locally in that profile before running the checks.
+The driver keeps the persistent profile at mode `0700` and deletes temporary profiles on exit.
 Google cookie import is not supported.
 
 ## Attach to a running browser
 
-`--attach <port>` joins with a Chromium that already runs with `--remote-debugging-port=<port>`, for example a signed-in headed browser.
+Use `--attach <port>` with a signed-in, headed Chromium that already runs with `--remote-debugging-port=<port>`.
 Use the English Google Meet UI.
-The driver closes its own tab on leave, setup failure, or drop.
-It does not close the browser or other tabs.
+The driver opens a new tab and requests closure of only that tab on leave, setup failure, or drop.
+It does not send a browser shutdown command.
 The attached bot ignores `--profile` and does not need a local Chromium binary or display.
-The speakers still start their own Chromium.
-Attach mode does not record URLs or text from pages outside Meet.
-It saves a screenshot only if the same Meet document remains active through capture.
+The bot skips guest name entry and can join from the lobby or enter the call directly.
+The driver uses the Meet call controls to detect admission.
+The join report omits the URL and text for pages outside the `https://meet.google.com` origin.
+The driver saves a screenshot only if the Meet document has the same ID before and after capture.
 The driver creates a new owner-only evidence directory for each attached run and prints its path.
 To use `--out`, give a new directory path under an existing parent that you trust.
 
     scripts/p0-exit.sh <meet-link> --attach 9523 --checks join
 
-The attached tab runs in the browser's own profile. Do not use it with a second person's private session.
+The attached tab uses Chromium's signed-in profile, not `--name`, for the Meet identity.
+Do not use another person's private session.
 
 ## Pinned Chromium
 
@@ -39,14 +42,14 @@ The attached tab runs in the browser's own profile. Do not use it with a second 
 
   (`chrome@stable` resolved to this build on 2026-11-13. Pin the number, not the channel.)
 - The driver uses the newest build under that directory, or `--chrome <path>` / `PARLEY_CHROME`.
-- The browser is never headless. `scripts/p0-exit.sh` runs it inside Xvfb (plan risk R1).
-  It needs `xvfb-run` and `xauth`.
+- `scripts/p0-exit.sh` uses Xvfb for runs that start Chromium, including attached runs that start test speakers.
+  Install `xvfb-run` and `xauth` for those runs.
 
 ## Files
 
 | File | Role |
 | --- | --- |
-| `src/lib.rs` | Starts Chromium, injects the page script, runs the guest join state machine |
+| `src/lib.rs` | Manages the browser session, injects the page script, and tracks the join state |
 | `src/cdp.rs` | Thin CDP client over one WebSocket: only the commands the driver sends, never `Runtime.enable` |
 | `page/selectors.json` | Every Meet selector and page text, in one file (plan risk R2) |
 | `page/inject.js` | Page script: 16 kHz PCM frames, chat, roster, speaking, tile canvas |
@@ -72,9 +75,9 @@ Run the page state tests with `node --test crates/parley-join/page/inject.test.c
 
 ## Phase 0 findings
 
-See `docs/phase0/join.md`: the guest join is a no-go as tested (Meet refuses every guest), the signed-in join waits on a local sign-in in the persistent `--profile` profile (Join, Chat, Tile, Outsider and speaker checks: NOT RUN), and `--use-file-for-fake-audio-capture` works.
+See the [Phase 0 run results](../../docs/phase0/join.md).
 
 ## Limits
 
 - The driver records Meet's refusal text as the outcome and does not try to hide that it is automated.
-- Every launch fails when the browser product string or `navigator.userAgent` says headless.
+- The driver rejects headless Chromium.

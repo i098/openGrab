@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Phase 0 exit test, Meet join. Usage: scripts/p0-exit.sh <meet-link> [p0-exit options]
-# Runs the non-headless Chromium inside Xvfb (plan risk R1). See crates/parley-join/README.md.
+# See crates/parley-join/README.md for browser setup.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"

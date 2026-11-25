@@ -1,7 +1,7 @@
 # Phase 0: joining a Google Meet call
 
 This document records the join part of Phase 0 (plan sections 6 and 6.1).
-Every statement comes from a run on one Linux host on 2026-11-13.
+The results below come from runs on one Linux host on 2026-11-13.
 Screenshots, logs and recordings stay outside the repository, because they show account names.
 No account name, e-mail address or cookie appears here.
 
@@ -10,19 +10,14 @@ No account name, e-mail address or cookie appears here.
 | Join kind | Verdict | Why |
 | --- | --- | --- |
 | Guest (no Google account) | **No-go, as tested** | Meet refused every guest with "You can't join this video call". The host was in the call each time and no knock reached the host. |
-| Signed-in bot | **NOT RUN** | The signed-in join waits on a local sign-in in the persistent `--profile` profile. The section 6.1 checks (Join, Chat, Tile, Outsider, speakers) did not run. The earlier cookie-copy attempt is recorded in F5 as history only. |
+| Signed-in bot | **NOT RUN** | The section 6.1 checks did not run with a signed-in account on that date. See F5 for the earlier cookie-copy attempt. |
 
 Section 6.1 checks that ran: Join (guest) failed. Chat, Tile, Outsider and speakers-in-call did not run, because no run got into a call.
 One part of Phase 0 is proven: Chromium profiles can play a known recording as a microphone (F3).
 
-## What the code does
+## Current usage
 
-`crates/parley-join` starts a pinned Chromium (not headless, inside Xvfb), injects one page script, and drives the Meet page through a thin CDP client over one WebSocket.
-The driver never sends `Runtime.enable` and does not try to hide that it is automated.
-`scripts/p0-exit.sh <meet-link>` runs the section 6.1 checks and prints one PASS or FAIL line each.
-Every launch fails when the browser product string or `navigator.userAgent` says headless.
-The crate has no sign-in code.
-See `crates/parley-join/README.md` for the Chromium version and the install command.
+See the [driver README](../../crates/parley-join/README.md) for browser setup and Phase 0 check commands.
 
 ## F1. The guest refusal does not depend on the driver
 
@@ -99,12 +94,3 @@ Measured on 2026-11-13:
 
 The source browser later showed every account as signed out. These observations do not establish
 when or why its sessions ended. An account list alone does not prove that a session is usable.
-
-The replacement is `p0_exit --profile <directory>`. It retains a server-local browser profile at mode 700.
-The profile must be outside the repository, and new, empty or an existing Chromium profile; the driver rejects any other directory without changing it.
-Temporary profiles are deleted after the browser exits.
-
-## Next
-
-Sign in locally in the persistent profile before running the section 6.1 checks.
-Live tests wait for the verified virtual-phone setup. No new login has started in this resumed task.

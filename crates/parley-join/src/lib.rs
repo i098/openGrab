@@ -1,8 +1,8 @@
 //! Rust driver for a Chromium bot that joins a Google Meet call (Phase 0 spike, plan 5.1 row 1).
 //!
-//! The driver starts a pinned, non-headless Chromium (run it inside Xvfb, R1), injects
-//! `page/inject.js` before the page loads, and talks to it over a local WebSocket (audio, chat,
-//! roster) and CDP (clicks, text input, commands). A persistent profile retains a local sign-in.
+//! Use [`Browser::Launch`] to start Chromium or [`Browser::Attach`] to use a local debugging port.
+//! The injected page script sends audio, chat, and roster events over a local WebSocket.
+//! The driver uses CDP for browser commands and input.
 
 pub mod analysis;
 pub mod cdp;
@@ -129,7 +129,7 @@ pub struct PageState {
 #[derive(Debug, Clone, Serialize)]
 pub struct JoinReport {
     pub outcome: Outcome,
-    /// Time from the click on "Ask to join" to the end state. With no click, from the start of the join.
+    /// Milliseconds since the most recent click on the join control, or since join started if there was no click.
     pub waited_ms: u128,
     pub last_state: PageState,
 }
@@ -142,7 +142,7 @@ pub struct Session {
     opts: Opts,
     events: mpsc::UnboundedReceiver<CallEvent>,
     tasks: Vec<JoinHandle<()>>,
-    /// The tab this driver opened in an attached browser. Closed on drop; the browser stays open.
+    /// The only tab that this session can close in attach mode.
     owned_target: Option<OwnedTab>,
 }
 
@@ -300,7 +300,7 @@ impl Session {
         }
     }
 
-    /// Open the Meet link, pass the pre-join screen (a guest types a name), ask to join and wait for the host.
+    /// Open the Meet link and wait for the call UI, a terminal page state, or a timeout.
     pub async fn join(&mut self, url: &str, timeout: Duration) -> Result<JoinReport> {
         let start = Instant::now();
         self.navigate(url).await;
@@ -486,6 +486,7 @@ impl Session {
         self.eval("__parley.roster()").await
     }
 
+    /// Save a PNG. Return `false` without writing if the attached tab lacks a Meet document or its document ID changes.
     pub async fn screenshot(&self, path: &Path) -> Result<bool> {
         const SCREENSHOT_DOCUMENT: &str = "window.__parley?.screenshotDocument() ?? null";
         let document = if self.attached() {
@@ -918,8 +919,8 @@ mod tests {
         .enumerate()
         {
             let mut active = before;
-            let (session, browser) = mock_attached_session(move |request| {
-                match request["method"].as_str().unwrap() {
+            let (session, browser) =
+                mock_attached_session(move |request| match request["method"].as_str().unwrap() {
                     "Runtime.evaluate" => json!({"result": {"value": active}}),
                     "Page.captureScreenshot" => {
                         assert!(active.is_some(), "off-site screenshot requested");
@@ -927,9 +928,8 @@ mod tests {
                         json!({"data": "iVBORw0KGgo="})
                     }
                     method => panic!("unexpected browser command: {method}"),
-                }
-            })
-            .await;
+                })
+                .await;
             let path = root.join(format!("{index}.png"));
             assert_eq!(session.screenshot(&path).await.unwrap(), saved);
             if saved {
