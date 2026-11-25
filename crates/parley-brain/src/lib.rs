@@ -194,6 +194,20 @@ pub fn is_recap_request(request: &str) -> bool {
     r.contains("recap") || r.contains("summar")
 }
 
+/// True when the request asks to write the shared doc: its first word, after "please" or "can you", is a writing verb.
+/// A keyword match, no model call.
+pub fn is_doc_request(request: &str) -> bool {
+    let r = request.to_lowercase();
+    let mut words = r
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .skip_while(|w| matches!(*w, "please" | "can" | "could" | "would" | "you"));
+    matches!(
+        words.next(),
+        Some("write" | "draft" | "create" | "start" | "add" | "put" | "make" | "update" | "append")
+    )
+}
+
 fn take_chars(s: &str, n: usize) -> &str {
     &s[..s.char_indices().nth(n).map_or(s.len(), |(i, _)| i)]
 }
@@ -254,12 +268,32 @@ fn notes_tool() -> ToolDef {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionItem, Notes, find_request, format_recap, is_recap_request};
+    use super::{ActionItem, Notes, find_request, format_recap, is_doc_request, is_recap_request};
 
     fn item(text: &str, owner: Option<&str>) -> ActionItem {
         ActionItem {
             text: text.into(),
             owner: owner.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn classifies_doc_requests() {
+        for q in [
+            "start a doc for the launch plan",
+            "Write the decisions down",
+            "can you please add an agenda",
+            "Could you draft a summary of risks",
+        ] {
+            assert!(is_doc_request(q), "{q}");
+        }
+        for q in [
+            "what did Tom agree to?",
+            "who started the doc?",
+            "can you hear me",
+            "recap",
+        ] {
+            assert!(!is_doc_request(q), "{q}");
         }
     }
 

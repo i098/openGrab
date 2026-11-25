@@ -1277,6 +1277,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "parley-bot"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "parley-brain",
+ "parley-join",
+ "parley-server",
+ "parley-stt",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "parley-brain"
 version = "0.0.0"
 dependencies = [

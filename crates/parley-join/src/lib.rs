@@ -561,6 +561,13 @@ impl Session {
         Ok(true)
     }
 
+    /// Play a WAV file into the bot's silent microphone, so the call hears it once the microphone is on.
+    /// Attach mode has no fake microphone. Returns the length in seconds. Fails before the call has requested a microphone.
+    pub async fn say(&self, wav: &[u8]) -> Result<f64> {
+        self.eval(&format!("__parley.say({})", serde_json::to_string(wav)?))
+            .await
+    }
+
     /// Next page or audio event, or None after `within`.
     pub async fn next_event(&mut self, within: Duration) -> Option<CallEvent> {
         if !self.attached() {
@@ -570,7 +577,7 @@ impl Session {
                 .flatten();
         }
         // Chrome can refuse the page's WebSocket to the driver (error, no CSP report), so the page keeps
-        // its text messages queued and the driver takes them with `Runtime.evaluate`. Audio is not polled.
+        // its text messages and audio frames queued and the driver takes them with `Runtime.evaluate`.
         let end = Instant::now() + within;
         loop {
             if let Some(event) = self.polled.pop_front() {
@@ -590,6 +597,13 @@ impl Session {
                     .iter()
                     .filter_map(|m| serde_json::from_str(m).ok())
                     .map(CallEvent::Page),
+            );
+            let audio: Vec<String> = self.eval("__parley.takeAudio()").await.unwrap_or_default();
+            self.polled.extend(
+                audio
+                    .iter()
+                    .filter_map(|b| AudioFrame::decode(&decode_base64(b).ok()?).ok())
+                    .map(CallEvent::Audio),
             );
         }
     }
@@ -633,6 +647,17 @@ impl Drop for Session {
         {
             let _ = std::fs::remove_dir_all(profile);
         }
+    }
+}
+
+/// `link` for the signed-in Google account `n` (`?authuser=N`); any query or fragment is dropped.
+pub fn with_authuser(link: &str, n: Option<u8>) -> String {
+    match n {
+        Some(n) => {
+            let base = link.split(['?', '#']).next().unwrap_or(link);
+            format!("{base}?authuser={n}")
+        }
+        None => link.to_owned(),
     }
 }
 

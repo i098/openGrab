@@ -48,9 +48,19 @@
     ws.onopen = () => queue.splice(0).forEach((m) => ws.send(m));
     ws.onclose = () => setTimeout(connect, 1000);
   };
+  // Attach mode: Chrome can refuse the WebSocket, so text and audio wait here and the driver polls them.
+  const audioQueue = [];
+  const b64 = (buf) => {
+    const u = new Uint8Array(buf);
+    let s = "";
+    for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000));
+    return btoa(s);
+  };
   const send = (m) => {
     if (ws && ws.readyState === 1) ws.send(m);
-    else if (queue.length < 500 && (!CFG.attached || typeof m === "string")) queue.push(m);
+    else if (CFG.attached && typeof m !== "string") {
+      if (audioQueue.length < 3000) audioQueue.push(m); // about 5 minutes of one track
+    } else if (queue.length < 500) queue.push(m);
   };
   const sendJson = (o) => send(JSON.stringify(o));
   const log = (msg) => sendJson({ t: "log", msg: String(msg) });
@@ -76,6 +86,7 @@
   setInterval(draw, 500);
   const tileStream = canvas.captureStream(5);
 
+  let mic = null; // the silent microphone of the bot: `say()` plays into it
   if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
     const real = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     navigator.mediaDevices.getUserMedia = async (c) => {
@@ -86,7 +97,9 @@
           (await real({ audio: true })).getAudioTracks().forEach((t) => out.addTrack(t));
         } else {
           const ctx = new AudioContext();
-          out.addTrack(ctx.createMediaStreamDestination().stream.getAudioTracks()[0]); // silent mic
+          const dest = ctx.createMediaStreamDestination(); // silent mic
+          mic = { ctx, dest };
+          out.addTrack(dest.stream.getAudioTracks()[0]);
         }
       }
       return out;
@@ -346,6 +359,19 @@ registerProcessor("parley-pcm",P)`;
     media: () => ({ mic: muteState(q1(S.micButton)), cam: muteState(q1(S.camButton)) }),
     // Text messages the page could not send over the WebSocket; the driver polls them in attach mode.
     takeQueue: () => queue.splice(0).filter((m) => typeof m === "string"),
+    // Audio frames the page could not send over the WebSocket, as base64; the driver polls them in attach mode.
+    takeAudio: () => audioQueue.splice(0).map(b64),
+    // Play a WAV (array of bytes) into the silent microphone: attach mode has no fake microphone. Returns seconds.
+    say: async (bytes) => {
+      if (!mic) throw new Error("no microphone yet");
+      const buf = await mic.ctx.decodeAudioData(new Uint8Array(bytes).buffer);
+      await mic.ctx.resume();
+      const src = mic.ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(mic.dest);
+      src.start();
+      return buf.duration;
+    },
     chatOpen: chatPanelOpen,
     noteSent: (text) => sentLines.add(norm(text)),
     chatCount: (text) => chatLines().filter((l) => l === norm(text)).length,

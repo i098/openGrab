@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use parley_join::analysis::{rms, speaking_match, wav_bytes};
 use parley_join::protocol::{CallEvent, PageMsg, Participant};
-use parley_join::{Browser, Opts, Outcome, Role, Session};
+use parley_join::{Browser, Opts, Outcome, Role, Session, with_authuser};
 use std::collections::{BTreeMap, VecDeque};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
@@ -191,16 +191,6 @@ fn others_in_view(tiles: &serde_json::Value) -> usize {
         non_self
     } else {
         non_self.saturating_sub(1)
-    }
-}
-
-fn with_authuser(link: &str, n: Option<u8>) -> String {
-    match n {
-        Some(n) => {
-            let base = link.split(['?', '#']).next().unwrap_or(link);
-            format!("{base}?authuser={n}")
-        }
-        None => link.to_owned(),
     }
 }
 

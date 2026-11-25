@@ -34,8 +34,9 @@ opens a second window as the host, admits the bot, and checks chat in both direc
 
     scripts/p0-exit.sh <meet-link> --attach 9523 --checks join,chat,tile,outsider --host-authuser 0 --bot-authuser 1
 
-The host account must own the meeting. In attach mode the page script queues its text messages and the driver polls
-them, because Chrome can refuse the page's WebSocket. Audio is not available in attach mode, so `speakers` needs a launched Chromium.
+The host account must own the meeting. In attach mode the page script queues its text messages and its audio frames, and the driver
+polls them (`next_event`, every 0.5 s), because Chrome can refuse the page's WebSocket. The `speakers` check still needs a launched Chromium:
+attach mode has no fake microphone. `Session::say` plays a WAV into the bot's silent microphone instead.
 
 The attached tab uses Chromium's signed-in profile, not `--name`, for the Meet identity.
 Do not use another person's private session.
