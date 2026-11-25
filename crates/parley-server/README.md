@@ -19,4 +19,4 @@ cargo run -p parley-server --bin page_demo -- meeting.txt
 
 ## Test
 
-`cargo test -p parley-server` checks the secret, the pause, resume and remove states, and one line received over a WebSocket. No network.
+`cargo test -p parley-server` checks the secret, the pause, resume and remove states, one line received over a WebSocket, and the doc and board sync (two clients and a server edit converge). No network.
