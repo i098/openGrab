@@ -320,6 +320,12 @@ async fn main() -> Result<()> {
     );
 
     page.click_and_confirm("#remove").await?;
+    let bye = wait_chat(&mut host, 60, |t| mentions(t, "left the call")).await;
+    ok &= verdict(
+        bye.is_some(),
+        "goodbye",
+        bye.as_deref().unwrap_or("no goodbye line in the Meet chat"),
+    );
     let left = tokio::time::timeout(Duration::from_secs(90), child.wait()).await;
     ok &= verdict(
         matches!(&left, Ok(Ok(s)) if s.success()),
