@@ -1,0 +1,12 @@
+[package]
+name = "parley-artifacts"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Parley meeting artifacts: a yrs document in the y-prosemirror layout that Tiptap reads."
+publish = false
+
+[dependencies]
+yrs = "0.28"
+serde_json = "1"
+thiserror = "2"
