@@ -18,6 +18,7 @@ ydoc.on("update", (u: Uint8Array, origin: unknown) => {
 });
 
 function connect() {
+  if (document.documentElement.dataset.state === "removed") return;
   const s = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${base}/doc/ws`);
   ws = s;
   s.binaryType = "arraybuffer";

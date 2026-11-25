@@ -167,3 +167,25 @@ async fn live_doc_converges_for_two_clients_and_a_server_edit() {
     let text = want.to_string();
     assert!(text.contains("from a") && text.contains("from server"));
 }
+
+#[tokio::test]
+async fn removed_meeting_closes_doc_sockets_and_refuses_new_ones() {
+    let m = Meeting::new(new_secret());
+    let sec = m.secret().to_string();
+    let (addr, _tx) = serve(m.clone()).await;
+    let url = format!("ws://{addr}/m/{sec}/doc/ws");
+    let (mut a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    a.next().await.unwrap().unwrap();
+    m.append_paragraph("secret words");
+    a.next().await.unwrap().unwrap();
+    assert!(m.doc_json().to_string().contains("secret words"));
+
+    m.remove();
+
+    assert!(matches!(
+        a.next().await,
+        Some(Ok(Message::Close(_))) | Some(Err(_)) | None
+    ));
+    assert!(tokio_tungstenite::connect_async(&url).await.is_err());
+    assert!(!m.doc_json().to_string().contains("secret words"));
+}

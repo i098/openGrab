@@ -29,7 +29,13 @@ const EDITOR_JS: &str = include_str!("../../../web/editor.js");
 const MAX_DOC_MESSAGE: usize = 1 << 20;
 
 /// A Yjs update and the id of the client that sent it (0 for the server).
-type DocEvent = (u64, Arc<Vec<u8>>);
+#[derive(Clone)]
+enum DocEvent {
+    /// A Yjs update with the id of the client that sent it (0 for the server).
+    Update(u64, Arc<Vec<u8>>),
+    /// The meeting was removed: close the socket.
+    Closed,
+}
 
 /// One transcript line.
 #[derive(Clone, Debug, Serialize)]
@@ -65,9 +71,8 @@ pub struct Meeting {
     secret: String,
     inner: Mutex<Inner>,
     events: broadcast::Sender<Event>,
-    /// The live doc. Held while an update is applied and sent, so a joiner misses none.
-    doc: Mutex<Artifact>,
-    /// Yjs updates with the id of the client that sent them (0 for the server).
+    /// The live doc, None once removed. Held while an update is applied and sent, so a joiner misses none.
+    doc: Mutex<Option<Artifact>>,
     doc_events: broadcast::Sender<DocEvent>,
     next_client: AtomicU64,
 }
@@ -88,7 +93,7 @@ impl Meeting {
                 lines: Vec::new(),
             }),
             events: broadcast::channel(1024).0,
-            doc: Mutex::new(Artifact::new()),
+            doc: Mutex::new(Some(Artifact::new())),
             doc_events: broadcast::channel(1024).0,
             next_client: AtomicU64::new(1),
         })
@@ -129,12 +134,15 @@ impl Meeting {
         self.transition(SessionState::Paused, SessionState::Running)
     }
 
-    /// Remove: final. Drops the transcript from memory.
+    /// Remove: final. Drops the transcript and the live doc from memory.
     pub fn remove(&self) -> SessionState {
         let mut g = self.inner.lock().unwrap();
         if g.state != SessionState::Removed {
             g.state = SessionState::Removed;
             g.lines = Vec::new();
+            let mut doc = self.doc.lock().unwrap();
+            *doc = None;
+            let _ = self.doc_events.send(DocEvent::Closed);
             let _ = self.events.send(Event::State {
                 state: SessionState::Removed,
             });
@@ -160,29 +168,43 @@ impl Meeting {
 
     /// Server-side edit of the live doc; every open page shows it at once.
     pub fn append_paragraph(&self, text: &str) {
-        let doc = self.doc.lock().unwrap();
+        let guard = self.doc.lock().unwrap();
+        let Some(doc) = guard.as_ref() else { return };
         doc.append_paragraph(&[Span::plain(text)]);
         // The full state is a valid update for every client: Yjs ignores what it has.
-        let _ = self.doc_events.send((0, Arc::new(doc.encode_update())));
+        let _ = self
+            .doc_events
+            .send(DocEvent::Update(0, Arc::new(doc.encode_update())));
     }
 
     /// The live doc as Tiptap JSON.
     pub fn doc_json(&self) -> serde_json::Value {
-        self.doc.lock().unwrap().to_json().unwrap_or_default()
+        self.doc
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|d| d.to_json().ok())
+            .unwrap_or_default()
     }
 
     /// Apply a client update and pass it on. Err means the update is invalid.
     fn doc_update(&self, from: u64, update: Vec<u8>) -> Result<(), parley_artifacts::Error> {
-        let doc = self.doc.lock().unwrap();
+        let guard = self.doc.lock().unwrap();
+        let Some(doc) = guard.as_ref() else {
+            return Ok(());
+        };
         doc.apply_update(&update)?;
-        let _ = self.doc_events.send((from, Arc::new(update)));
+        let _ = self
+            .doc_events
+            .send(DocEvent::Update(from, Arc::new(update)));
         Ok(())
     }
 
-    /// Full state and live updates, taken under one lock.
-    fn doc_subscribe(&self) -> (Vec<u8>, broadcast::Receiver<DocEvent>) {
-        let doc = self.doc.lock().unwrap();
-        (doc.encode_update(), self.doc_events.subscribe())
+    /// Full state and live updates, taken under one lock. None once removed.
+    fn doc_subscribe(&self) -> Option<(Vec<u8>, broadcast::Receiver<DocEvent>)> {
+        let guard = self.doc.lock().unwrap();
+        let doc = guard.as_ref()?;
+        Some((doc.encode_update(), self.doc_events.subscribe()))
     }
 
     /// Copy of the kept lines.
@@ -238,6 +260,7 @@ async fn doc_ws(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     match authorize(&m, &secret) {
+        Ok(()) if m.state() == SessionState::Removed => StatusCode::NOT_FOUND.into_response(),
         Ok(()) => upgrade
             .max_message_size(MAX_DOC_MESSAGE)
             .on_upgrade(move |s| doc_feed(s, m)),
@@ -247,21 +270,29 @@ async fn doc_ws(
 
 async fn doc_feed(mut socket: WebSocket, m: Arc<Meeting>) {
     let id = m.next_client.fetch_add(1, Ordering::Relaxed);
-    let (state, mut rx) = m.doc_subscribe();
+    let Some((state, mut rx)) = m.doc_subscribe() else {
+        return;
+    };
     if socket.send(Message::binary(state)).await.is_err() {
         return;
     }
     loop {
         tokio::select! {
             ev = rx.recv() => match ev {
-                Ok((from, update)) => {
+                Ok(DocEvent::Update(from, update)) => {
                     if from != id && socket.send(Message::binary(update.to_vec())).await.is_err() {
                         return;
                     }
                 }
+                Ok(DocEvent::Closed) => {
+                    let _ = socket.send(Message::Close(None)).await;
+                    return;
+                }
                 // Missed updates: resend the full state.
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let (state, r) = m.doc_subscribe();
+                    let Some((state, r)) = m.doc_subscribe() else {
+                        return;
+                    };
                     rx = r;
                     if socket.send(Message::binary(state)).await.is_err() {
                         return;

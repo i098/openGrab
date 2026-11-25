@@ -54,6 +54,8 @@ function addLine(l) {
 
 function setState(s) {
   state = s;
+  document.documentElement.dataset.state = s;
+  $("doc").style.display = s === "removed" ? "none" : "";
   $("status").textContent = { running: "Live", paused: "Paused", removed: "Removed" }[s];
   $("pause").disabled = s !== "running";
   $("resume").disabled = s !== "paused";
