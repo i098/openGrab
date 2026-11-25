@@ -17,6 +17,8 @@ use yrs::{
 /// Name of the root fragment, the default of `@tiptap/extension-collaboration`.
 pub const FRAGMENT: &str = "default";
 
+pub mod board;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("invalid update: {0}")]
@@ -25,6 +27,8 @@ pub enum Error {
     Apply(#[from] yrs::error::UpdateError),
     #[error("unsupported node in the document: {0}")]
     Unsupported(String),
+    #[error("invalid board: {0}")]
+    Invalid(String),
 }
 
 /// A run of text with marks.

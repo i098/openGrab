@@ -1,0 +1,15 @@
+{
+  "name": "excalidraw-roundtrip",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run roundtrip.ts"
+  },
+  "dependencies": {
+    "@excalidraw/excalidraw": "^0.18.1",
+    "@napi-rs/canvas": "^1.2.0",
+    "@resvg/resvg-js": "^2.6.2",
+    "happy-dom": "^15.11.0",
+    "yjs": "^13.6.0"
+  }
+}
