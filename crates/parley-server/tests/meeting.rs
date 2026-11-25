@@ -233,14 +233,15 @@ async fn board_converges_for_two_clients_and_a_server_edit() {
     m.set_board(&board(&["Api", "Store"])).unwrap();
     let (mut a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
     let (mut b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-    let local_a = BoardDoc::new();
-    let local_b = BoardDoc::new();
-    for (ws, local) in [(&mut a, &local_a), (&mut b, &local_b)] {
+    let mut locals = Vec::new();
+    for ws in [&mut a, &mut b] {
         let Message::Binary(s) = ws.next().await.unwrap().unwrap() else {
             panic!("binary")
         };
-        local.apply_update(&s).unwrap();
+        locals.push(BoardDoc::from_update(&s).unwrap());
     }
+    let local_b = locals.pop().unwrap();
+    let local_a = locals.pop().unwrap();
     assert_eq!(ids(&local_a.elements().unwrap()), ids(&m.board_elements()));
     let before = m.board_elements();
     assert!(!before.is_empty());

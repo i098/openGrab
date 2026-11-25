@@ -24,18 +24,23 @@ ydoc.on("update", (u: Uint8Array, origin: unknown) => {
   if (origin !== "remote" && ws?.readyState === WebSocket.OPEN) ws.send(u);
 });
 
-function array(): Y.Array<El> {
-  let a = shared.get("elements") as Y.Array<El> | undefined;
-  if (!a) {
-    a = new Y.Array<El>();
-    shared.set("elements", a);
-  }
-  return a;
+const elementsOf = () => shared.get("elements") as Y.Array<El> | undefined;
+
+// Concurrent edits of one element each insert a copy; keep the first so every peer drops the same extras.
+function dedupe(a: Y.Array<El>) {
+  const seen = new Set<string>();
+  const extra: number[] = [];
+  a.forEach((e, i) => {
+    if (seen.has(e.id)) extra.push(i);
+    else seen.add(e.id);
+  });
+  if (extra.length) ydoc.transact(() => extra.reverse().forEach((i) => a.delete(i, 1)));
 }
 
 // Local edit: write only the elements whose version differs from the shared copy.
 function onChange(elements: readonly El[]) {
-  const a = array();
+  const a = elementsOf();
+  if (!a) return;
   const at = new Map<string, number>();
   a.forEach((e, i) => at.set(e.id, i));
   ydoc.transact(() => {
@@ -53,8 +58,10 @@ function onChange(elements: readonly El[]) {
 
 // Remote edit: show the shared elements. onChange then finds equal versions and writes nothing.
 function show() {
-  if (!api) return;
-  const elements = restoreElements(array().toJSON(), null);
+  const a = elementsOf();
+  if (!api || !a) return;
+  dedupe(a);
+  const elements = restoreElements(a.toJSON(), null);
   api.updateScene({ elements });
   // Bring the content into view when it is new or replaced as a whole (a server edit).
   // A peer adding one shape keeps the old ids, so the view stays where the person put it.
