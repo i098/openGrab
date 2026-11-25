@@ -367,10 +367,22 @@ async fn page(State(m): State<Arc<Meeting>>, Path(secret): Path<String>) -> Resp
 }
 
 /// Static bundle: gzip (built once) for clients that accept it, with a cache header.
-fn bundle(headers: &HeaderMap, kind: &'static str, raw: &'static str, gz: &'static OnceLock<Vec<u8>>) -> Response {
+fn bundle(
+    headers: &HeaderMap,
+    kind: &'static str,
+    raw: &'static str,
+    gz: &'static OnceLock<Vec<u8>>,
+) -> Response {
     use std::io::Write;
-    let base = [(header::CONTENT_TYPE, kind), (header::CACHE_CONTROL, "private, max-age=3600"), (header::VARY, "accept-encoding")];
-    let accepts = headers.get(header::ACCEPT_ENCODING).and_then(|v| v.to_str().ok()).is_some_and(|v| v.contains("gzip"));
+    let base = [
+        (header::CONTENT_TYPE, kind),
+        (header::CACHE_CONTROL, "private, max-age=3600"),
+        (header::VARY, "accept-encoding"),
+    ];
+    let accepts = headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("gzip"));
     if !accepts {
         return (base, raw).into_response();
     }
@@ -382,7 +394,11 @@ fn bundle(headers: &HeaderMap, kind: &'static str, raw: &'static str, gz: &'stat
     (base, [(header::CONTENT_ENCODING, "gzip")], body.as_slice()).into_response()
 }
 
-async fn editor_js(State(m): State<Arc<Meeting>>, Path(secret): Path<String>, headers: HeaderMap) -> Response {
+async fn editor_js(
+    State(m): State<Arc<Meeting>>,
+    Path(secret): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     static GZ: OnceLock<Vec<u8>> = OnceLock::new();
     match authorize(&m, &secret) {
         Ok(()) => bundle(&headers, "text/javascript", EDITOR_JS, &GZ),
@@ -390,7 +406,11 @@ async fn editor_js(State(m): State<Arc<Meeting>>, Path(secret): Path<String>, he
     }
 }
 
-async fn board_js(State(m): State<Arc<Meeting>>, Path(secret): Path<String>, headers: HeaderMap) -> Response {
+async fn board_js(
+    State(m): State<Arc<Meeting>>,
+    Path(secret): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     static GZ: OnceLock<Vec<u8>> = OnceLock::new();
     match authorize(&m, &secret) {
         Ok(()) => bundle(&headers, "text/javascript", BOARD_JS, &GZ),
@@ -398,12 +418,22 @@ async fn board_js(State(m): State<Arc<Meeting>>, Path(secret): Path<String>, hea
     }
 }
 
-async fn font(State(m): State<Arc<Meeting>>, Path((secret, path)): Path<(String, String)>) -> Response {
+async fn font(
+    State(m): State<Arc<Meeting>>,
+    Path((secret, path)): Path<(String, String)>,
+) -> Response {
     if let Err(c) = authorize(&m, &secret) {
         return c.into_response();
     }
     match fonts::FONTS.iter().find(|(p, _)| *p == path) {
-        Some((_, b)) => ([(header::CONTENT_TYPE, "font/woff2"), (header::CACHE_CONTROL, "private, max-age=86400")], *b).into_response(),
+        Some((_, b)) => (
+            [
+                (header::CONTENT_TYPE, "font/woff2"),
+                (header::CACHE_CONTROL, "private, max-age=86400"),
+            ],
+            *b,
+        )
+            .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
