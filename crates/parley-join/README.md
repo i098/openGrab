@@ -12,8 +12,12 @@ Google cookie import is not supported.
 ## Attach to a running browser
 
 `--attach <port>` joins with a Chromium that already runs with `--remote-debugging-port=<port>`, for example a signed-in headed browser.
-The driver does not start a browser and never closes it. It opens its own new tab, leaves the other tabs alone, and closes its tab when the join ends with `leave`. If the driver fails before `leave`, its tab stays open: close it by hand.
-`--profile` is not used with `--attach`. Only the bot joins attached. Speakers still start their own Chromium.
+Use the English Google Meet UI.
+The driver closes its own tab on leave, setup failure, or drop.
+It does not close the browser or other tabs.
+The attached bot ignores `--profile` and does not need a local Chromium binary or display.
+The speakers still start their own Chromium.
+Attach mode does not take tab screenshots or record URLs or text from pages outside Meet.
 
     scripts/p0-exit.sh <meet-link> --attach 9523 --checks join
 
@@ -61,6 +65,7 @@ The host admits every guest. The script prints one `PASS` or `FAIL` line per che
 Chromium profiles, each with `--use-file-for-fake-audio-capture`).
 
 Build and test with `blaze` (`blaze test -p parley-join`). `scripts/p0-exit.sh` uses cargo only, because blaze cannot build `p0_exit`.
+Run the page state tests with `node --test crates/parley-join/page/inject.test.cjs`.
 
 ## Phase 0 findings
 

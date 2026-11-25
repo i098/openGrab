@@ -26,6 +26,7 @@ use tokio_tungstenite::tungstenite::{
 };
 
 const INJECT_JS: &str = include_str!("../page/inject.js");
+const MEET_ORIGIN: &str = "location.origin === 'https://meet.google.com'";
 
 #[derive(Debug, Clone)]
 pub enum Role {
@@ -37,14 +38,19 @@ pub enum Role {
 
 #[derive(Debug, Clone)]
 pub struct Opts {
-    pub chrome: PathBuf,
-    pub profile: PathBuf,
+    pub browser: Browser,
     pub name: String,
     pub role: Role,
-    /// Keep the profile after the browser exits.
-    pub persistent_profile: bool,
-    /// Attach to a running browser that has this remote-debugging port, instead of starting Chromium.
-    pub attach: Option<u16>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Browser {
+    Launch {
+        chrome: PathBuf,
+        profile: PathBuf,
+        persistent_profile: bool,
+    },
+    Attach(u16),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -137,92 +143,74 @@ pub struct Session {
     events: mpsc::UnboundedReceiver<CallEvent>,
     tasks: Vec<JoinHandle<()>>,
     /// The tab this driver opened in an attached browser. Closed on drop; the browser stays open.
-    owned_target: Option<String>,
+    owned_target: Option<OwnedTab>,
 }
 
 impl Session {
     pub async fn launch(opts: Opts) -> Result<Self> {
-        if std::env::var_os("DISPLAY").is_none() {
-            bail!(
-                "DISPLAY is not set: the bot never runs headless; start it inside Xvfb (scripts/p0-exit.sh does)"
-            );
-        }
+        let temporary_profile = match &opts.browser {
+            Browser::Attach(_) => None,
+            Browser::Launch {
+                profile,
+                persistent_profile,
+                ..
+            } => {
+                if std::env::var_os("DISPLAY").is_none() {
+                    bail!(
+                        "DISPLAY is not set: the bot never runs headless; start it inside Xvfb (scripts/p0-exit.sh does)"
+                    );
+                }
+                (!persistent_profile).then(|| profile.clone())
+            }
+        };
         let token = random_token()?;
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let ws_url = format!("ws://{}/{token}", listener.local_addr()?);
         let (tx, events) = mpsc::unbounded_channel();
         let task = tokio::spawn(serve(listener, token, tx));
         let abort = task.abort_handle();
-        let profile = opts.profile.clone();
-        let persistent = opts.persistent_profile;
-        let started = Self::start(opts, ws_url, events, vec![task]).await;
-        if started.is_err() {
-            abort.abort();
-            if !persistent {
-                let _ = std::fs::remove_dir_all(profile);
+        match Self::start(opts, events, vec![task]).await {
+            Ok(session) => {
+                session.configure(ws_url).await?;
+                Ok(session)
+            }
+            Err(error) => {
+                abort.abort();
+                if let Some(profile) = temporary_profile {
+                    let _ = std::fs::remove_dir_all(profile);
+                }
+                Err(error)
             }
         }
-        started
     }
 
     async fn start(
         opts: Opts,
-        ws_url: String,
         events: mpsc::UnboundedReceiver<CallEvent>,
         tasks: Vec<JoinHandle<()>>,
     ) -> Result<Self> {
-        let mut args = vec![
-            "--use-fake-ui-for-media-stream".to_string(),
-            "--use-fake-device-for-media-stream".to_string(),
-            "--autoplay-policy=no-user-gesture-required".to_string(),
-            "--lang=en-US".to_string(),
-            "--accept-lang=en-US".to_string(),
-        ];
-        if let Role::Speaker { audio } = &opts.role {
-            args.push(format!(
-                "--use-file-for-fake-audio-capture={}",
-                audio.display()
-            ));
-        }
-        // The profile holds the browser's cookies; a persistent one may already exist (see `check_profile`).
-        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
-            .create(&opts.profile)?;
-        std::fs::set_permissions(
-            &opts.profile,
-            std::os::unix::fs::PermissionsExt::from_mode(0o700),
-        )?;
-        let port = opts.attach.map_or_else(free_port, Ok)?;
-        // A fixed port, not 0: Chromium treats port 0 as automation mode and sets `navigator.webdriver` to true.
-        // No `--enable-automation`, no stealth flags: a plain Chromium with a window and fake media devices.
-        // With `attach`, the browser is already running (for example the fleet voxl tier) and is not started here.
-        let mut child = match opts.attach {
-            Some(_) => None,
-            None => Some(
-                tokio::process::Command::new(&opts.chrome)
-                    .arg(format!("--user-data-dir={}", opts.profile.display()))
-                    .arg(format!("--remote-debugging-port={port}"))
-                    .arg("--window-size=1280,800")
-                    .args(["--no-first-run", "--no-default-browser-check"])
-                    .args(&args)
-                    .arg("about:blank")
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .kill_on_drop(true)
-                    .spawn()
-                    .context("launching Chromium")?,
-            ),
+        let (port, child) = match &opts.browser {
+            Browser::Attach(port) => (*port, None),
+            Browser::Launch {
+                chrome, profile, ..
+            } => {
+                let port = free_port()?;
+                (
+                    port,
+                    Some(start_chromium(chrome, profile, &opts.role, port)?),
+                )
+            }
         };
         let ws_path = cdp::browser_socket(port, Duration::from_secs(120)).await?;
         let cdp = Cdp::connect(&ws_path).await?;
         // Attach: the user's browser has its own tabs, so the driver opens a new one. Never the first page target.
-        let (tab, owned_target) = if opts.attach.is_some() {
-            let id = cdp
-                .call(None, "Target.createTarget", json!({"url": "about:blank"}))
-                .await?["targetId"]
-                .as_str()
-                .context("no target id for the new tab")?
-                .to_string();
-            (attach_tab(&cdp, &id).await?, Some(id))
+        let owned_target = if matches!(opts.browser, Browser::Attach(_)) {
+            Some(OwnedTab::create(&cdp, port).await?)
+        } else {
+            None
+        };
+        let tab = if let Some(owned) = &owned_target {
+            attach_tab(&cdp, owned.id.as_deref().unwrap()).await?
         } else {
             let targets = cdp.call(None, "Target.getTargets", json!({})).await?;
             let target = targets["targetInfos"]
@@ -230,67 +218,9 @@ impl Session {
                 .and_then(|t| t.iter().find(|t| t["type"] == "page"))
                 .context("the first tab is missing")?["targetId"]
                 .as_str()
-                .context("the first tab has no target id")?
-                .to_string();
-            (attach_tab(&cdp, &target).await?, None)
+                .context("the first tab has no target id")?;
+            attach_tab(&cdp, target).await?
         };
-        let headed: Result<()> = async {
-            let ua = cdp
-                .call(
-                    Some(&tab),
-                    "Runtime.evaluate",
-                    json!({"expression": "navigator.userAgent", "returnByValue": true}),
-                )
-                .await?["result"]["value"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .context("no navigator.userAgent")?
-                .to_string();
-            let v = cdp.call(None, "Browser.getVersion", json!({})).await?;
-            let product = v["product"].as_str().filter(|s| !s.is_empty());
-            let version_ua = v["userAgent"].as_str().filter(|s| !s.is_empty());
-            let (Some(product), Some(version_ua)) = (product, version_ua) else {
-                bail!("Browser.getVersion gave no product or userAgent");
-            };
-            for s in [ua.as_str(), product, version_ua] {
-                if s.to_lowercase().contains("headless") {
-                    bail!("the browser says headless ({s}): the bot runs headed only");
-                }
-            }
-            Ok(())
-        }
-        .await;
-        let configured: Result<()> = async {
-            headed?;
-            let cfg_js = serde_json::json!({
-                "ws": ws_url,
-                "role": if matches!(opts.role, Role::Bot) { "bot" } else { "speaker" },
-                "name": opts.name,
-                "selectors": selectors::load()?,
-            });
-            // Without `Page.enable` the new-document script did not run in this setup.
-            cdp.call(Some(&tab), "Page.enable", json!({})).await?;
-            let source = format!("window.__PARLEY_CFG = {cfg_js};\n{INJECT_JS}");
-            cdp.call(
-                Some(&tab),
-                "Page.addScriptToEvaluateOnNewDocument",
-                json!({"source": source}),
-            )
-            .await?;
-            Ok(())
-        }
-        .await;
-        if let Err(e) = configured {
-            if let Some(c) = child.as_mut() {
-                let _ = c.kill().await;
-            }
-            if let Some(id) = &owned_target {
-                let _ = cdp
-                    .call(None, "Target.closeTarget", json!({"targetId": id}))
-                    .await;
-            }
-            return Err(e);
-        }
         Ok(Self {
             cdp,
             child,
@@ -300,6 +230,47 @@ impl Session {
             tasks,
             owned_target,
         })
+    }
+
+    fn attached(&self) -> bool {
+        matches!(self.opts.browser, Browser::Attach(_))
+    }
+
+    async fn configure(&self, ws_url: String) -> Result<()> {
+        let ua: String = self.eval_raw("navigator.userAgent").await?;
+        anyhow::ensure!(!ua.is_empty(), "no navigator.userAgent");
+        let v = self.cdp.call(None, "Browser.getVersion", json!({})).await?;
+        let product = v["product"].as_str().filter(|s| !s.is_empty());
+        let version_ua = v["userAgent"].as_str().filter(|s| !s.is_empty());
+        let (Some(product), Some(version_ua)) = (product, version_ua) else {
+            bail!("Browser.getVersion gave no product or userAgent");
+        };
+        for s in [ua.as_str(), product, version_ua] {
+            if s.to_lowercase().contains("headless") {
+                bail!("the browser says headless ({s}): the bot runs headed only");
+            }
+        }
+        let cfg_js = serde_json::json!({
+            "ws": ws_url,
+            "role": if matches!(self.opts.role, Role::Bot) { "bot" } else { "speaker" },
+            "name": self.opts.name,
+            "selectors": selectors::load()?,
+        });
+        // Without `Page.enable` the new-document script did not run in this setup.
+        self.cmd("Page.enable", json!({})).await?;
+        let source = if self.attached() {
+            format!(
+                "if (window.top === window && {MEET_ORIGIN}) {{\nwindow.__PARLEY_CFG = {cfg_js};\n{INJECT_JS}\n}}"
+            )
+        } else {
+            format!("window.__PARLEY_CFG = {cfg_js};\n{INJECT_JS}")
+        };
+        self.cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({"source": source}),
+        )
+        .await?;
+        Ok(())
     }
 
     async fn cmd(&self, method: &str, params: Value) -> Result<Value> {
@@ -322,6 +293,7 @@ impl Session {
         let nav = self.cmd("Page.navigate", json!({"url": url}));
         match tokio::time::timeout(Duration::from_secs(20), nav).await {
             Ok(Ok(_)) => {}
+            Ok(Err(_)) if self.attached() => eprintln!("navigate failed; polling the page anyway"),
             Ok(Err(e)) => eprintln!("navigate reply: {e}; polling the page anyway"),
             Err(_) => eprintln!("navigate: no reply in 20s; polling the page anyway"),
         }
@@ -331,7 +303,7 @@ impl Session {
     pub async fn join(&mut self, url: &str, timeout: Duration) -> Result<JoinReport> {
         let start = Instant::now();
         self.navigate(url).await;
-        let mut named = false;
+        let mut ready = false;
         let mut clicked: Option<Instant> = None;
         let mut state = PageState::default();
         let outcome = loop {
@@ -343,9 +315,8 @@ impl Session {
                 break outcome;
             }
             if state.phase == "prejoin" {
-                if !named {
-                    // A signed-in profile has no name field: its join button is already enabled.
-                    named = self.enter_name().await.is_ok() || state.can_join;
+                if !ready {
+                    ready = (!self.attached() && self.enter_name().await.is_ok()) || state.can_join;
                     self.set_media(false, matches!(self.opts.role, Role::Bot))
                         .await?;
                 } else if state.can_join
@@ -367,12 +338,27 @@ impl Session {
     }
 
     pub async fn state(&self) -> PageState {
-        self.eval("window.__parley ? __parley.state() : {phase: 'loading'}")
-            .await
-            .unwrap_or_default()
+        const STATE: &str = "window.__parley ? __parley.state() : {phase: 'loading'}";
+        if self.attached() {
+            let js = format!(
+                "{MEET_ORIGIN} ? ({STATE}) : {{phase: location.protocol === 'about:' ? 'loading' : 'offsite'}}"
+            );
+            self.eval_raw(&js).await.unwrap_or_default()
+        } else {
+            self.eval_raw(STATE).await.unwrap_or_default()
+        }
     }
 
     pub async fn eval<T: DeserializeOwned>(&self, js: &str) -> Result<T> {
+        if self.attached() {
+            return self
+                .eval_raw(&format!("{MEET_ORIGIN} ? ({js}) : null"))
+                .await;
+        }
+        self.eval_raw(js).await
+    }
+
+    async fn eval_raw<T: DeserializeOwned>(&self, js: &str) -> Result<T> {
         let r = self
             .cmd(
                 "Runtime.evaluate",
@@ -501,12 +487,15 @@ impl Session {
         self.eval("__parley.roster()").await
     }
 
-    pub async fn screenshot(&self, path: &Path) -> Result<()> {
+    pub async fn screenshot(&self, path: &Path) -> Result<bool> {
+        if self.attached() {
+            return Ok(false);
+        }
         let r = self
             .cmd("Page.captureScreenshot", json!({"format": "png"}))
             .await?;
         std::fs::write(path, decode_base64(r["data"].as_str().unwrap_or_default())?)?;
-        Ok(())
+        Ok(true)
     }
 
     /// Next page or audio event, or None after `within`.
@@ -518,19 +507,15 @@ impl Session {
     }
 
     pub async fn leave(mut self) -> Result<()> {
-        let _ = self.click("leave").await;
-        // Attached: close only the tab this driver opened. The browser itself is not ours to close.
-        match self.owned_target.take() {
-            Some(id) => {
-                let _ = self
-                    .cdp
-                    .call(None, "Target.closeTarget", json!({"targetId": id}))
-                    .await;
-            }
-            None => {
-                let _ = self.cdp.call(None, "Browser.close", json!({})).await;
-            }
+        if self.attached() {
+            let mut target = self
+                .owned_target
+                .take()
+                .context("the attached tab is missing")?;
+            return tokio::task::spawn_blocking(move || target.close()).await?;
         }
+        let _ = self.click("leave").await;
+        let _ = self.cdp.call(None, "Browser.close", json!({})).await;
         if let Some(child) = self.child.as_mut() {
             let _ = child.wait().await;
         }
@@ -552,8 +537,83 @@ impl Drop for Session {
         for t in &self.tasks {
             t.abort();
         }
-        if !self.opts.persistent_profile {
-            let _ = std::fs::remove_dir_all(&self.opts.profile);
+        if let Browser::Launch {
+            profile,
+            persistent_profile: false,
+            ..
+        } = &self.opts.browser
+        {
+            let _ = std::fs::remove_dir_all(profile);
+        }
+    }
+}
+
+struct OwnedTab {
+    port: u16,
+    id: Option<String>,
+}
+
+impl OwnedTab {
+    async fn create(cdp: &Cdp, port: u16) -> Result<Self> {
+        let reply = cdp
+            .call(None, "Target.createTarget", json!({"url": "about:blank"}))
+            .await?;
+        let id = reply["targetId"]
+            .as_str()
+            .filter(|id| {
+                !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+            .context("no valid target id for the new tab")?;
+        Ok(Self {
+            port,
+            id: Some(id.to_owned()),
+        })
+    }
+
+    fn close(&mut self) -> Result<()> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+
+        let Some(id) = self.id.as_deref() else {
+            return Ok(());
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, self.port));
+        let mut status = String::new();
+        loop {
+            let time_left = deadline.saturating_duration_since(Instant::now());
+            anyhow::ensure!(
+                !time_left.is_zero(),
+                "Chromium did not confirm closing tab {id}"
+            );
+            let mut stream = TcpStream::connect_timeout(&addr, time_left)?;
+            stream.set_read_timeout(Some(time_left))?;
+            stream.set_write_timeout(Some(time_left))?;
+            write!(
+                stream,
+                "GET /json/close/{id} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            )?;
+            status.clear();
+            BufReader::new(stream).read_line(&mut status)?;
+            match status.split_ascii_whitespace().nth(1) {
+                Some("404") => {
+                    self.id = None;
+                    return Ok(());
+                }
+                Some("200") => std::thread::sleep(Duration::from_millis(100)),
+                _ => bail!(
+                    "Chromium did not accept closing tab {id}: {}",
+                    status.trim()
+                ),
+            }
+        }
+    }
+}
+
+impl Drop for OwnedTab {
+    fn drop(&mut self) {
+        if let Err(error) = self.close() {
+            eprintln!("Could not close the attached tab: {error:#}");
         }
     }
 }
@@ -582,6 +642,45 @@ async fn attach_tab(cdp: &Cdp, target: &str) -> Result<String> {
         .as_str()
         .context("no session id for the tab")?
         .to_string())
+}
+
+fn start_chromium(
+    chrome: &Path,
+    profile: &Path,
+    role: &Role,
+    port: u16,
+) -> Result<tokio::process::Child> {
+    // The profile holds the browser's cookies; a persistent one may already exist (see `check_profile`).
+    std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+        .create(profile)?;
+    std::fs::set_permissions(profile, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    // A fixed port, not 0: Chromium treats port 0 as automation mode and sets `navigator.webdriver` to true.
+    // No `--enable-automation`, no stealth flags: a plain Chromium with a window and fake media devices.
+    let mut cmd = tokio::process::Command::new(chrome);
+    cmd.arg(format!("--user-data-dir={}", profile.display()))
+        .arg(format!("--remote-debugging-port={port}"))
+        .args([
+            "--window-size=1280,800",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--use-fake-ui-for-media-stream",
+            "--use-fake-device-for-media-stream",
+            "--autoplay-policy=no-user-gesture-required",
+            "--lang=en-US",
+            "--accept-lang=en-US",
+        ]);
+    if let Role::Speaker { audio } = role {
+        cmd.arg(format!(
+            "--use-file-for-fake-audio-capture={}",
+            audio.display()
+        ));
+    }
+    cmd.arg("about:blank")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("launching Chromium")
 }
 
 /// A port the kernel just handed out; Chromium binds it a moment later.
@@ -685,6 +784,123 @@ mod tests {
             assert_eq!(super::terminal_outcome(phase), None, "phase {phase:?}");
         }
     }
+
+    #[tokio::test]
+    async fn signed_in_lobby_clicks_join_now_without_entering_a_name() {
+        use super::*;
+        use futures_util::SinkExt;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let browser = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut joined = false;
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let params = &request["params"];
+                let result = match request["method"].as_str().unwrap() {
+                    "Page.navigate" => json!({}),
+                    "Runtime.evaluate" => {
+                        let expression = params["expression"].as_str().unwrap();
+                        let value = if expression.contains("__parley.state()") {
+                            if joined {
+                                json!({"phase": "in_call"})
+                            } else {
+                                json!({"phase": "prejoin", "can_join": true})
+                            }
+                        } else if expression.contains("__parley.media()") {
+                            json!({"mic": false, "cam": true})
+                        } else if expression.contains("__parley.point('join')") {
+                            json!({"x": 30, "y": 35})
+                        } else {
+                            panic!("unexpected evaluation: {expression}");
+                        };
+                        json!({"result": {"value": value}})
+                    }
+                    "Input.dispatchMouseEvent" => {
+                        assert_eq!(params["x"], 30.0);
+                        assert_eq!(params["y"], 35.0);
+                        if params["type"] == "mouseReleased" {
+                            assert!(!joined);
+                            joined = true;
+                        }
+                        json!({})
+                    }
+                    method => panic!("unexpected browser command: {method}"),
+                };
+                ws.send(Message::text(
+                    json!({"id": request["id"], "result": result}).to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+            joined
+        });
+        let mut session = Session {
+            cdp: Cdp::connect(&format!("ws://127.0.0.1:{port}"))
+                .await
+                .unwrap(),
+            child: None,
+            tab: "tab-session".into(),
+            opts: Opts {
+                browser: Browser::Attach(port),
+                name: "Test".into(),
+                role: Role::Bot,
+            },
+            events: mpsc::unbounded_channel().1,
+            tasks: Vec::new(),
+            owned_target: None,
+        };
+        let report = session
+            .join(
+                "https://meet.google.com/abc-defg-hij",
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.outcome, Outcome::Admitted);
+        drop(session);
+        assert!(browser.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn attached_tab_drop_waits_for_its_target_to_disappear() {
+        use super::*;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let browser = tokio::spawn(async move {
+            for status in ["200 OK", "404 Not Found"] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(line, "GET /json/close/owned-tab HTTP/1.1\r\n");
+                while line != "\r\n" {
+                    line.clear();
+                    assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                }
+                let reply = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
+                let stream = stream.get_mut();
+                stream.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        tokio::task::spawn_blocking(move || {
+            drop(OwnedTab {
+                port,
+                id: Some("owned-tab".into()),
+            })
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), browser)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn failed_launch_keeps_persistent_profile_and_removes_temporary_profile() {
         if std::env::var_os("PARLEY_PROFILE_TEST_CHILD").is_none() {
@@ -710,12 +926,13 @@ mod tests {
             std::fs::create_dir_all(&profile).unwrap();
             std::fs::write(profile.join("existing-session"), b"test").unwrap();
             let result = super::Session::launch(super::Opts {
-                chrome: root.join("missing-browser"),
-                profile: profile.clone(),
+                browser: super::Browser::Launch {
+                    chrome: root.join("missing-browser"),
+                    profile: profile.clone(),
+                    persistent_profile,
+                },
                 name: "test".into(),
                 role: super::Role::Bot,
-                persistent_profile,
-                attach: None,
             })
             .await;
             assert!(result.is_err());
