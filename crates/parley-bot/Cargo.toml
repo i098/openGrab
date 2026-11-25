@@ -1,0 +1,22 @@
+[package]
+name = "parley-bot"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "The parley binary: joins a Google Meet call and connects transcript, chat answers and the meeting page."
+publish = false
+
+[[bin]]
+name = "parley"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+parley-brain = { path = "../parley-brain" }
+parley-join = { path = "../parley-join" }
+parley-server = { path = "../parley-server" }
+parley-stt = { path = "../parley-stt" }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }

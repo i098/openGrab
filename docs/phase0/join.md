@@ -114,7 +114,7 @@ The bot window (`?authuser=1`, the other domain) is the participant under test.
 Findings that the run needed code changes for:
 
 - Meet no longer sets `aria-pressed` on the chat toggle. The driver now treats a visible message list as an open panel. Before this, the driver toggled the panel shut on every post.
-- Chrome refuses the page's WebSocket to the driver in this attached browser (the page gets an error and no CSP report). In attach mode the driver now takes the page's queued text messages with `Runtime.evaluate`. Audio frames need the WebSocket and do not arrive in attach mode.
+- Chrome refuses the page's WebSocket to the driver in this attached browser (the page gets an error and no CSP report). In attach mode the driver now takes the page's queued text messages with `Runtime.evaluate`. The page also queues its audio frames and the driver takes them the same way (`next_event`).
 - A Meet page with `?authuser=N` never committed when the page script ran at document start (the tab stayed on `about:blank`). For such links the driver now injects the script after the page loads.
 - The host and the bot can have the same display name, so the page script no longer skips a message only because the sender name equals its own name. It skips the lines the driver posted itself and Meet's "You".
 - The host of a guest flagged "With potential risks" sees only "Deny" and a "More actions" menu. The menu item "Admit entry" admits the guest. For a normal guest the host sees the "N guest waiting" button, then an "Admit" button.
@@ -126,6 +126,5 @@ Findings that the run needed code changes for:
 The speaker check (three guests with `--use-file-for-fake-audio-capture`, F3) did not run with signed-in accounts.
 It needs three more Chromium processes with their own `--user-data-dir`, because the fake-audio flag is a launch flag and cannot change in the shared browser.
 A new profile has no Google session, and these profiles would be guests, which Meet refuses (F1). Signing a new profile in is not allowed on this host.
-Also, audio frames do not reach the driver in attach mode (F6), so the recorded audio part of the check cannot run there either.
 Not tested: whether Meet lights one speaking indicator per fake-audio participant. The method that works for the audio itself is F3.
 To close this gap, run the speaker check where a signed-in profile for each speaker can be made, or find a way to read the speaking indicator without a new profile.

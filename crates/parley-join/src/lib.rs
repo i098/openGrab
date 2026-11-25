@@ -26,6 +26,46 @@ use tokio_tungstenite::tungstenite::{
 };
 
 const INJECT_JS: &str = include_str!("../page/inject.js");
+/// Attach mode, registered before any page script: the browser has no microphone or camera, so Meet shows "Mic not found"
+/// and never asks for one. This lists one fake microphone and one fake camera and answers `getUserMedia` with a silent
+/// microphone (kept in `window.__parleyMics` for `say`) and an empty picture. The full page script is small enough
+/// to run late but cannot run at document start on every account, so only this part runs early.
+const DEVICE_STUB_JS: &str = r#"(() => {
+  if (window.top !== window || location.origin !== 'https://meet.google.com' || !navigator.mediaDevices) return;
+  const md = navigator.mediaDevices;
+  const realEnum = md.enumerateDevices.bind(md);
+  const fake = (kind, id, label) => ({ kind, deviceId: id, label, groupId: 'parley', toJSON() { return this; } });
+  md.enumerateDevices = async () => {
+    const l = (await realEnum()).filter((d) => d.deviceId);
+    const has = (k) => l.some((d) => d.kind === k);
+    return [...l, ...(has('audioinput') ? [] : [fake('audioinput', 'parley-mic', 'Parley microphone')]),
+      ...(has('videoinput') ? [] : [fake('videoinput', 'parley-cam', 'Parley camera')])];
+  };
+  // The stub devices are always allowed: a blocked profile permission makes Meet show "Microphone problem" and mute the send.
+  if (navigator.permissions && navigator.permissions.query) {
+    const realQuery = navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query = async (d) => d && (d.name === 'microphone' || d.name === 'camera')
+      ? { name: d.name, state: 'granted', onchange: null, addEventListener() {}, removeEventListener() {} }
+      : realQuery(d);
+  }
+  md.getUserMedia = async (c) => {
+    const out = new MediaStream();
+    if (c && c.video) {
+      const cv = document.createElement('canvas');
+      cv.width = 640;
+      cv.height = 360;
+      cv.getContext('2d').fillRect(0, 0, 1, 1);
+      out.addTrack(cv.captureStream(5).getVideoTracks()[0]);
+    }
+    if (c && c.audio) {
+      const ctx = new AudioContext();
+      const dest = ctx.createMediaStreamDestination();
+      (window.__parleyMics = window.__parleyMics || []).push({ ctx, dest });
+      out.addTrack(dest.stream.getAudioTracks()[0]);
+    }
+    return out;
+  };
+})();"#;
 const MEET_ORIGIN: &str = "location.origin === 'https://meet.google.com'";
 
 #[derive(Debug, Clone)]
@@ -279,6 +319,11 @@ impl Session {
             )
             .await?;
         if self.attached() {
+            self.cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({"source": DEVICE_STUB_JS}),
+            )
+            .await?;
             let id = reply["identifier"].as_str().unwrap_or_default().to_owned();
             self.script = Some((source, id));
         }
@@ -477,9 +522,15 @@ impl Session {
 
     /// Open the chat panel with a trusted click and give the page script one scan to prime.
     pub async fn open_chat(&self) -> Result<()> {
-        if !self.eval::<bool>("__parley.chatOpen()").await? {
-            self.click("chatToggle").await?;
-            tokio::time::sleep(Duration::from_millis(1500)).await;
+        // A loaded host or a side panel that Meet opens by itself can leave the panel closed after one click: try again.
+        for _ in 0..6 {
+            if self.eval::<bool>("__parley.chatReady()").await? {
+                return Ok(());
+            }
+            if !self.eval::<bool>("__parley.chatOpen()").await? {
+                self.click("chatToggle").await?;
+            }
+            tokio::time::sleep(Duration::from_millis(2000)).await;
         }
         Ok(())
     }
@@ -561,6 +612,13 @@ impl Session {
         Ok(true)
     }
 
+    /// Play a WAV file into the bot's silent microphone, so the call hears it once the microphone is on.
+    /// Attach mode has no fake microphone. Returns the length in seconds. Fails before the call has requested a microphone.
+    pub async fn say(&self, wav: &[u8]) -> Result<f64> {
+        self.eval(&format!("__parley.say({})", serde_json::to_string(wav)?))
+            .await
+    }
+
     /// Next page or audio event, or None after `within`.
     pub async fn next_event(&mut self, within: Duration) -> Option<CallEvent> {
         if !self.attached() {
@@ -570,7 +628,7 @@ impl Session {
                 .flatten();
         }
         // Chrome can refuse the page's WebSocket to the driver (error, no CSP report), so the page keeps
-        // its text messages queued and the driver takes them with `Runtime.evaluate`. Audio is not polled.
+        // its text messages and audio frames queued and the driver takes them with `Runtime.evaluate`.
         let end = Instant::now() + within;
         loop {
             if let Some(event) = self.polled.pop_front() {
@@ -590,6 +648,13 @@ impl Session {
                     .iter()
                     .filter_map(|m| serde_json::from_str(m).ok())
                     .map(CallEvent::Page),
+            );
+            let audio: Vec<String> = self.eval("__parley.takeAudio()").await.unwrap_or_default();
+            self.polled.extend(
+                audio
+                    .iter()
+                    .filter_map(|b| AudioFrame::decode(&decode_base64(b).ok()?).ok())
+                    .map(CallEvent::Audio),
             );
         }
     }
@@ -633,6 +698,17 @@ impl Drop for Session {
         {
             let _ = std::fs::remove_dir_all(profile);
         }
+    }
+}
+
+/// `link` for the signed-in Google account `n` (`?authuser=N`); any query or fragment is dropped.
+pub fn with_authuser(link: &str, n: Option<u8>) -> String {
+    match n {
+        Some(n) => {
+            let base = link.split(['?', '#']).next().unwrap_or(link);
+            format!("{base}?authuser={n}")
+        }
+        None => link.to_owned(),
     }
 }
 

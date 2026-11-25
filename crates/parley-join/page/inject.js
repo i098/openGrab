@@ -48,9 +48,19 @@
     ws.onopen = () => queue.splice(0).forEach((m) => ws.send(m));
     ws.onclose = () => setTimeout(connect, 1000);
   };
+  // Attach mode: Chrome can refuse the WebSocket, so text and audio wait here and the driver polls them.
+  const audioQueue = [];
+  const b64 = (buf) => {
+    const u = new Uint8Array(buf);
+    let s = "";
+    for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000));
+    return btoa(s);
+  };
   const send = (m) => {
     if (ws && ws.readyState === 1) ws.send(m);
-    else if (queue.length < 500 && (!CFG.attached || typeof m === "string")) queue.push(m);
+    else if (CFG.attached && typeof m !== "string") {
+      if (audioQueue.length < 3000) audioQueue.push(m); // about 5 minutes of one track
+    } else if (queue.length < 500) queue.push(m);
   };
   const sendJson = (o) => send(JSON.stringify(o));
   const log = (msg) => sendJson({ t: "log", msg: String(msg) });
@@ -86,7 +96,9 @@
           (await real({ audio: true })).getAudioTracks().forEach((t) => out.addTrack(t));
         } else {
           const ctx = new AudioContext();
-          out.addTrack(ctx.createMediaStreamDestination().stream.getAudioTracks()[0]); // silent mic
+          const dest = ctx.createMediaStreamDestination(); // silent mic
+          (window.__parleyMics = window.__parleyMics || []).push({ ctx, dest });
+          out.addTrack(dest.stream.getAudioTracks()[0]);
         }
       }
       return out;
@@ -155,6 +167,20 @@ registerProcessor("parley-pcm",P)`;
     Object.setPrototypeOf(Hooked, Orig);
     window.RTCPeerConnection = Hooked;
   }
+
+  // A page that got this script after Meet had made its connections (a chosen `authuser=` account) never fires the
+  // hook above for them, so also tap the remote streams that Meet's own media elements already play.
+  setInterval(() => {
+    for (const el of document.querySelectorAll("audio, video")) {
+      const s = el.srcObject;
+      if (!(s instanceof MediaStream)) continue;
+      for (const t of s.getAudioTracks()) {
+        if (t.readyState !== "live" || seenTracks.has(t.id)) continue;
+        seenTracks.add(t.id);
+        tap(t, s).catch((x) => log(`tap failed: ${x}`));
+      }
+    }
+  }, 1000);
 
   // ---- roster and speaking indicators ------------------------------------
   const tileName = (el) => {
@@ -346,7 +372,27 @@ registerProcessor("parley-pcm",P)`;
     media: () => ({ mic: muteState(q1(S.micButton)), cam: muteState(q1(S.camButton)) }),
     // Text messages the page could not send over the WebSocket; the driver polls them in attach mode.
     takeQueue: () => queue.splice(0).filter((m) => typeof m === "string"),
+    // Audio frames the page could not send over the WebSocket, as base64; the driver polls them in attach mode.
+    takeAudio: () => audioQueue.splice(0).map(b64),
+    // Play a WAV (array of bytes) into the silent microphone: attach mode has no fake microphone. Returns seconds.
+    say: async (bytes) => {
+      // Play into every microphone the page made: Meet may be sending any of them.
+      const mics = window.__parleyMics || [];
+      if (!mics.length) throw new Error("no microphone yet");
+      let seconds = 0;
+      for (const m of mics) {
+        const buf = await m.ctx.decodeAudioData(new Uint8Array(bytes).buffer);
+        await m.ctx.resume();
+        const src = m.ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(m.dest);
+        src.start();
+        seconds = buf.duration;
+      }
+      return seconds;
+    },
     chatOpen: chatPanelOpen,
+    chatReady: () => chatPanelOpen() && !!q1(S.chatComposer),
     noteSent: (text) => sentLines.add(norm(text)),
     chatCount: (text) => chatLines().filter((l) => l === norm(text)).length,
     setTile: (s) => {
