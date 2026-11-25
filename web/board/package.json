@@ -2,7 +2,7 @@
   "name": "meeting-board",
   "private": true,
   "type": "module",
-  "scripts": { "build": "bun build board.tsx --minify --production --conditions production --outdir .. --entry-naming '[name].[ext]' && echo built" },
+  "scripts": { "build": "bun build board.tsx --minify --production --conditions production --outdir .. --entry-naming '[name].[ext]' && rm -rf ../fonts && mkdir ../fonts && for d in node_modules/@excalidraw/excalidraw/dist/prod/fonts/*/; do [ $(basename $d) = Xiaolai ] || cp -r $d ../fonts/; done && sed -i 's#`https://esm.sh/${hr.PKG_NAME?`${hr.PKG_NAME}@${hr.PKG_VERSION}`:\"@excalidraw/excalidraw\"}/dist/prod/`#`${location.origin}/`#' ../board.js && ! grep -q esm.sh ../board.js && echo built" },
   "dependencies": {
     "@excalidraw/excalidraw": "^0.18.1",
     "react": "^19.0.0",

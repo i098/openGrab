@@ -2,7 +2,7 @@
 //! The server owns the state (running, paused, removed) and keeps only transcript text and the live doc in memory.
 
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
 
@@ -12,7 +12,7 @@ use axum::{
         Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
@@ -35,6 +35,10 @@ const PAGE: &str = include_str!("../../../web/index.html");
 const EDITOR_JS: &str = include_str!("../../../web/editor.js");
 /// Built from `web/board` with `bun run build`.
 const BOARD_JS: &str = include_str!("../../../web/board.js");
+/// Fonts Excalidraw loads from `<page>/fonts/...`, so no page asks a public CDN. Built from `web/board` with `bun run build`.
+mod fonts {
+    include!(concat!(env!("OUT_DIR"), "/fonts.rs"));
+}
 const BOARD_CSS: &str = include_str!("../../../web/board.css");
 /// Largest Yjs update one client may send.
 const MAX_DOC_MESSAGE: usize = 1 << 20;
@@ -339,6 +343,7 @@ pub fn app(meeting: Arc<Meeting>) -> (Router, mpsc::Sender<Line>) {
         .route("/m/{secret}/editor.js", get(editor_js))
         .route("/m/{secret}/board.js", get(board_js))
         .route("/m/{secret}/board.css", get(board_css))
+        .route("/m/{secret}/fonts/{*path}", get(font))
         .route("/m/{secret}/doc/ws", get(doc_ws))
         .route("/m/{secret}/board/ws", get(board_ws))
         .route("/m/{secret}/{action}", post(action))
@@ -361,17 +366,75 @@ async fn page(State(m): State<Arc<Meeting>>, Path(secret): Path<String>) -> Resp
     }
 }
 
-async fn editor_js(State(m): State<Arc<Meeting>>, Path(secret): Path<String>) -> Response {
+/// Static bundle: gzip (built once) for clients that accept it, with a cache header.
+fn bundle(
+    headers: &HeaderMap,
+    kind: &'static str,
+    raw: &'static str,
+    gz: &'static OnceLock<Vec<u8>>,
+) -> Response {
+    use std::io::Write;
+    let base = [
+        (header::CONTENT_TYPE, kind),
+        (header::CACHE_CONTROL, "private, max-age=3600"),
+        (header::VARY, "accept-encoding"),
+    ];
+    let accepts = headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("gzip"));
+    if !accepts {
+        return (base, raw).into_response();
+    }
+    let body = gz.get_or_init(|| {
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        e.write_all(raw.as_bytes()).expect("gzip to memory");
+        e.finish().expect("gzip to memory")
+    });
+    (base, [(header::CONTENT_ENCODING, "gzip")], body.as_slice()).into_response()
+}
+
+async fn editor_js(
+    State(m): State<Arc<Meeting>>,
+    Path(secret): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    static GZ: OnceLock<Vec<u8>> = OnceLock::new();
     match authorize(&m, &secret) {
-        Ok(()) => ([("content-type", "text/javascript")], EDITOR_JS).into_response(),
+        Ok(()) => bundle(&headers, "text/javascript", EDITOR_JS, &GZ),
         Err(c) => c.into_response(),
     }
 }
 
-async fn board_js(State(m): State<Arc<Meeting>>, Path(secret): Path<String>) -> Response {
+async fn board_js(
+    State(m): State<Arc<Meeting>>,
+    Path(secret): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    static GZ: OnceLock<Vec<u8>> = OnceLock::new();
     match authorize(&m, &secret) {
-        Ok(()) => ([("content-type", "text/javascript")], BOARD_JS).into_response(),
+        Ok(()) => bundle(&headers, "text/javascript", BOARD_JS, &GZ),
         Err(c) => c.into_response(),
+    }
+}
+
+async fn font(
+    State(m): State<Arc<Meeting>>,
+    Path((secret, path)): Path<(String, String)>,
+) -> Response {
+    if let Err(c) = authorize(&m, &secret) {
+        return c.into_response();
+    }
+    match fonts::FONTS.iter().find(|(p, _)| *p == path) {
+        Some((_, b)) => (
+            [
+                (header::CONTENT_TYPE, "font/woff2"),
+                (header::CACHE_CONTROL, "private, max-age=86400"),
+            ],
+            *b,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

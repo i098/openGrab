@@ -14,6 +14,8 @@ type Api = {
 };
 
 const base = location.pathname.replace(/\/$/, "");
+// Serve Excalidraw fonts from this server (`<page>/fonts/...`), not a public CDN.
+(window as unknown as { EXCALIDRAW_ASSET_PATH: string }).EXCALIDRAW_ASSET_PATH = `${base}/`;
 const ydoc = new Y.Doc();
 const shared = ydoc.getMap("board");
 let api: Api | undefined;
