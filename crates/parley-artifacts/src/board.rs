@@ -669,17 +669,34 @@ impl Default for BoardDoc {
 }
 
 impl BoardDoc {
+    /// A server-side document that owns the `elements` array, so clients only ever read it.
     pub fn new() -> Self {
+        let board = Self::empty();
+        {
+            let mut txn = board.doc.transact_mut();
+            let _: ArrayRef = board.board.get_or_init(&mut txn, ELEMENTS);
+        }
+        board
+    }
+
+    fn empty() -> Self {
         let doc = Doc::new();
         let board = doc.get_or_insert_map(BOARD);
         Self { doc, board }
     }
 
+    /// A replica of a document made by [`BoardDoc::new`]; it creates no array of its own.
     pub fn from_update(update: &[u8]) -> Result<Self, Error> {
-        let board = Self::new();
+        let board = Self::empty();
         let update = Update::decode_v1(update)?;
         board.doc.transact_mut().apply_update(update)?;
         Ok(board)
+    }
+
+    pub fn apply_update(&self, update: &[u8]) -> Result<(), Error> {
+        let update = Update::decode_v1(update)?;
+        self.doc.transact_mut().apply_update(update)?;
+        Ok(())
     }
 
     pub fn encode_update(&self) -> Vec<u8> {

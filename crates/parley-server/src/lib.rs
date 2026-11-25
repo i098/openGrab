@@ -17,7 +17,10 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use parley_artifacts::{Artifact, Span};
+use parley_artifacts::{
+    Artifact, Error, Span,
+    board::{Board, BoardDoc},
+};
 use serde::Serialize;
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, mpsc};
@@ -25,6 +28,9 @@ use tokio::sync::{broadcast, mpsc};
 const PAGE: &str = include_str!("../../../web/index.html");
 /// Built from `web/editor` with `bun run build`.
 const EDITOR_JS: &str = include_str!("../../../web/editor.js");
+/// Built from `web/board` with `bun run build`.
+const BOARD_JS: &str = include_str!("../../../web/board.js");
+const BOARD_CSS: &str = include_str!("../../../web/board.css");
 /// Largest Yjs update one client may send.
 const MAX_DOC_MESSAGE: usize = 1 << 20;
 
@@ -35,6 +41,84 @@ enum DocEvent {
     Update(u64, Arc<Vec<u8>>),
     /// The meeting was removed: close the socket.
     Closed,
+}
+
+/// A Yjs document that one WebSocket route syncs.
+trait Crdt {
+    fn apply(&self, update: &[u8]) -> Result<(), Error>;
+    /// The full state as one update.
+    fn encode(&self) -> Vec<u8>;
+}
+
+impl Crdt for Artifact {
+    fn apply(&self, update: &[u8]) -> Result<(), Error> {
+        self.apply_update(update)
+    }
+    fn encode(&self) -> Vec<u8> {
+        self.encode_update()
+    }
+}
+
+impl Crdt for BoardDoc {
+    fn apply(&self, update: &[u8]) -> Result<(), Error> {
+        self.apply_update(update)
+    }
+    fn encode(&self) -> Vec<u8> {
+        self.encode_update()
+    }
+}
+
+/// One synced document: None once removed. Held while an update is applied and sent, so a joiner misses none.
+struct Live<D> {
+    doc: Mutex<Option<D>>,
+    events: broadcast::Sender<DocEvent>,
+}
+
+impl<D: Crdt> Live<D> {
+    fn new(doc: D) -> Self {
+        Self {
+            doc: Mutex::new(Some(doc)),
+            events: broadcast::channel(1024).0,
+        }
+    }
+
+    /// Server-side edit; every open page shows it at once.
+    fn edit<R>(&self, f: impl FnOnce(&D) -> R) -> Option<R> {
+        let guard = self.doc.lock().unwrap();
+        let doc = guard.as_ref()?;
+        let out = f(doc);
+        // The full state is a valid update for every client: Yjs ignores what it has.
+        let _ = self
+            .events
+            .send(DocEvent::Update(0, Arc::new(doc.encode())));
+        Some(out)
+    }
+
+    fn read<R>(&self, f: impl FnOnce(&D) -> R) -> Option<R> {
+        self.doc.lock().unwrap().as_ref().map(f)
+    }
+
+    /// Apply a client update and pass it on. Err means the update is invalid.
+    fn update(&self, from: u64, update: Vec<u8>) -> Result<(), Error> {
+        let guard = self.doc.lock().unwrap();
+        let Some(doc) = guard.as_ref() else {
+            return Ok(());
+        };
+        doc.apply(&update)?;
+        let _ = self.events.send(DocEvent::Update(from, Arc::new(update)));
+        Ok(())
+    }
+
+    /// Full state and live updates, taken under one lock. None once removed.
+    fn subscribe(&self) -> Option<(Vec<u8>, broadcast::Receiver<DocEvent>)> {
+        let guard = self.doc.lock().unwrap();
+        Some((guard.as_ref()?.encode(), self.events.subscribe()))
+    }
+
+    fn close(&self) {
+        *self.doc.lock().unwrap() = None;
+        let _ = self.events.send(DocEvent::Closed);
+    }
 }
 
 /// One transcript line.
@@ -71,9 +155,8 @@ pub struct Meeting {
     secret: String,
     inner: Mutex<Inner>,
     events: broadcast::Sender<Event>,
-    /// The live doc, None once removed. Held while an update is applied and sent, so a joiner misses none.
-    doc: Mutex<Option<Artifact>>,
-    doc_events: broadcast::Sender<DocEvent>,
+    doc: Live<Artifact>,
+    board: Live<BoardDoc>,
     next_client: AtomicU64,
 }
 
@@ -93,8 +176,8 @@ impl Meeting {
                 lines: Vec::new(),
             }),
             events: broadcast::channel(1024).0,
-            doc: Mutex::new(Some(Artifact::new())),
-            doc_events: broadcast::channel(1024).0,
+            doc: Live::new(Artifact::new()),
+            board: Live::new(BoardDoc::new()),
             next_client: AtomicU64::new(1),
         })
     }
@@ -140,9 +223,8 @@ impl Meeting {
         if g.state != SessionState::Removed {
             g.state = SessionState::Removed;
             g.lines = Vec::new();
-            let mut doc = self.doc.lock().unwrap();
-            *doc = None;
-            let _ = self.doc_events.send(DocEvent::Closed);
+            self.doc.close();
+            self.board.close();
             let _ = self.events.send(Event::State {
                 state: SessionState::Removed,
             });
@@ -168,43 +250,29 @@ impl Meeting {
 
     /// Server-side edit of the live doc; every open page shows it at once.
     pub fn append_paragraph(&self, text: &str) {
-        let guard = self.doc.lock().unwrap();
-        let Some(doc) = guard.as_ref() else { return };
-        doc.append_paragraph(&[Span::plain(text)]);
-        // The full state is a valid update for every client: Yjs ignores what it has.
-        let _ = self
-            .doc_events
-            .send(DocEvent::Update(0, Arc::new(doc.encode_update())));
+        self.doc.edit(|d| d.append_paragraph(&[Span::plain(text)]));
     }
 
     /// The live doc as Tiptap JSON.
     pub fn doc_json(&self) -> serde_json::Value {
         self.doc
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|d| d.to_json().ok())
+            .read(|d| d.to_json().ok())
+            .flatten()
             .unwrap_or_default()
     }
 
-    /// Apply a client update and pass it on. Err means the update is invalid.
-    fn doc_update(&self, from: u64, update: Vec<u8>) -> Result<(), parley_artifacts::Error> {
-        let guard = self.doc.lock().unwrap();
-        let Some(doc) = guard.as_ref() else {
-            return Ok(());
-        };
-        doc.apply_update(&update)?;
-        let _ = self
-            .doc_events
-            .send(DocEvent::Update(from, Arc::new(update)));
+    /// Server-side edit of the board: lay out `board` and replace the elements; every open page shows it at once.
+    pub fn set_board(&self, board: &Board) -> Result<(), Error> {
+        let elements = board.elements()?;
+        self.board.edit(|d| d.set_elements(&elements));
         Ok(())
     }
 
-    /// Full state and live updates, taken under one lock. None once removed.
-    fn doc_subscribe(&self) -> Option<(Vec<u8>, broadcast::Receiver<DocEvent>)> {
-        let guard = self.doc.lock().unwrap();
-        let doc = guard.as_ref()?;
-        Some((doc.encode_update(), self.doc_events.subscribe()))
+    /// The board's Excalidraw elements. Empty once removed.
+    pub fn board_elements(&self) -> Vec<serde_json::Value> {
+        self.board
+            .read(|d| d.elements().unwrap_or_default())
+            .unwrap_or_default()
     }
 
     /// Copy of the kept lines.
@@ -226,7 +294,10 @@ pub fn app(meeting: Arc<Meeting>) -> (Router, mpsc::Sender<Line>) {
         .route("/m/{secret}", get(page))
         .route("/m/{secret}/ws", get(ws))
         .route("/m/{secret}/editor.js", get(editor_js))
+        .route("/m/{secret}/board.js", get(board_js))
+        .route("/m/{secret}/board.css", get(board_css))
         .route("/m/{secret}/doc/ws", get(doc_ws))
+        .route("/m/{secret}/board/ws", get(board_ws))
         .route("/m/{secret}/{action}", post(action))
         .with_state(meeting);
     (router, tx)
@@ -254,23 +325,60 @@ async fn editor_js(State(m): State<Arc<Meeting>>, Path(secret): Path<String>) ->
     }
 }
 
+async fn board_js(State(m): State<Arc<Meeting>>, Path(secret): Path<String>) -> Response {
+    match authorize(&m, &secret) {
+        Ok(()) => ([("content-type", "text/javascript")], BOARD_JS).into_response(),
+        Err(c) => c.into_response(),
+    }
+}
+
+async fn board_css(State(m): State<Arc<Meeting>>, Path(secret): Path<String>) -> Response {
+    match authorize(&m, &secret) {
+        Ok(()) => ([("content-type", "text/css")], BOARD_CSS).into_response(),
+        Err(c) => c.into_response(),
+    }
+}
+
 async fn doc_ws(
     State(m): State<Arc<Meeting>>,
     Path(secret): Path<String>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    sync_ws(m, secret, upgrade, |m| &m.doc).await
+}
+
+async fn board_ws(
+    State(m): State<Arc<Meeting>>,
+    Path(secret): Path<String>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    sync_ws(m, secret, upgrade, |m| &m.board).await
+}
+
+/// The one sync route for every live document.
+async fn sync_ws<D: Crdt + Send + 'static>(
+    m: Arc<Meeting>,
+    secret: String,
+    upgrade: WebSocketUpgrade,
+    pick: fn(&Meeting) -> &Live<D>,
+) -> Response {
     match authorize(&m, &secret) {
         Ok(()) if m.state() == SessionState::Removed => StatusCode::NOT_FOUND.into_response(),
         Ok(()) => upgrade
             .max_message_size(MAX_DOC_MESSAGE)
-            .on_upgrade(move |s| doc_feed(s, m)),
+            .on_upgrade(move |s| sync_feed(s, m, pick)),
         Err(c) => c.into_response(),
     }
 }
 
-async fn doc_feed(mut socket: WebSocket, m: Arc<Meeting>) {
+async fn sync_feed<D: Crdt>(
+    mut socket: WebSocket,
+    m: Arc<Meeting>,
+    pick: fn(&Meeting) -> &Live<D>,
+) {
     let id = m.next_client.fetch_add(1, Ordering::Relaxed);
-    let Some((state, mut rx)) = m.doc_subscribe() else {
+    let live = pick(&m);
+    let Some((state, mut rx)) = live.subscribe() else {
         return;
     };
     if socket.send(Message::binary(state)).await.is_err() {
@@ -290,7 +398,7 @@ async fn doc_feed(mut socket: WebSocket, m: Arc<Meeting>) {
                 }
                 // Missed updates: resend the full state.
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let Some((state, r)) = m.doc_subscribe() else {
+                    let Some((state, r)) = live.subscribe() else {
                         return;
                     };
                     rx = r;
@@ -302,7 +410,7 @@ async fn doc_feed(mut socket: WebSocket, m: Arc<Meeting>) {
             },
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(b))) => {
-                    if m.doc_update(id, b.to_vec()).is_err() {
+                    if live.update(id, b.to_vec()).is_err() {
                         return;
                     }
                 }
