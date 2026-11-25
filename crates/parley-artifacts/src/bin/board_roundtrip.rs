@@ -93,6 +93,11 @@ fn sample() -> Board {
                 to: "store".into(),
                 label: None,
             },
+            Edge {
+                from: "intake".into(),
+                to: "report".into(),
+                label: Some("audit".into()),
+            },
         ],
         groups: vec![
             Group {

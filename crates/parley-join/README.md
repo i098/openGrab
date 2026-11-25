@@ -16,11 +16,14 @@ Use `--attach <port>` with a signed-in, headed Chromium that already runs with `
 Use the English Google Meet UI.
 The driver opens a new tab and requests closure of only that tab on leave, setup failure, or drop.
 It does not send a browser shutdown command.
+If the tab is the only page, the driver first opens a blank spare tab, so the browser stays open.
+The driver refuses a link that is not a call link (`https://meet.google.com/abc-defg-hij`), so the Meet home page text cannot enter the saved page state.
 The attached bot ignores `--profile` and does not need a local Chromium binary or display.
 The bot skips guest name entry and can join from the lobby or enter the call directly.
 The driver uses the Meet call controls to detect admission.
 The join report omits the URL and text for pages outside the `https://meet.google.com` origin.
 The driver saves a screenshot only if the Meet document has the same ID before and after capture.
+If the tab leaves Meet between the check and the capture, the driver drops the pixels from memory and does not save them.
 The driver creates a new owner-only evidence directory for each attached run and prints its path.
 To use `--out`, give a new directory path under an existing parent that you trust.
 
@@ -79,5 +82,8 @@ See the [Phase 0 run results](../../docs/phase0/join.md).
 
 ## Limits
 
+- Attach mode: use one Chromium profile. CDP cannot select a profile, so the new tab opens in the last-used profile.
+- Attach mode: if Chromium creates the tab but the CDP reply is lost, the driver closes the one new blank tab it finds. With two or more new blank tabs, it closes none, because it cannot know which is its own.
+- Attach mode: the screenshot check and the capture are two CDP commands. CDP has no single command that does both, so a redirect between them can put non-Meet pixels in driver memory. The driver never saves them.
 - The driver records Meet's refusal text as the outcome and does not try to hide that it is automated.
 - The driver rejects headless Chromium.
