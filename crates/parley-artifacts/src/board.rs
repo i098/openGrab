@@ -477,12 +477,9 @@ fn route(from: &Placed, to: &Placed, nodes: &[Placed]) -> Vec<(f64, f64)> {
         return straight;
     }
     let lane_y = from.y.min(to.y) - ROW_GAP / 2.0;
-    let top = vec![
-        (from.x + from.width / 2.0, from.y),
-        (from.x + from.width / 2.0, lane_y),
-        (to.x + to.width / 2.0, lane_y),
-        (to.x + to.width / 2.0, to.y),
-    ];
+    // Leave the node at three quarters of its width, clear of a group label above its left end.
+    let (fx, tx) = (from.x + from.width * 0.75, to.x + to.width * 0.75);
+    let top = vec![(fx, from.y), (fx, lane_y), (tx, lane_y), (tx, to.y)];
     let lane_x = (from.x + from.width).max(to.x + to.width) + LAYER_GAP / 2.0;
     let side = vec![
         (from.x + from.width, from.y + from.height / 2.0),
