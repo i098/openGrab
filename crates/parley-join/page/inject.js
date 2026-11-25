@@ -1,6 +1,6 @@
 // Injected into every Meet page by parley-join before the page's own scripts run.
 // Thin on purpose (R12): it reads the page and reports; all decisions live in the Rust driver.
-// window.__PARLEY_CFG = { ws, role: "bot" | "speaker", name, selectors } is prepended by the driver.
+// window.__PARLEY_CFG = { ws, role: "bot" | "speaker", name, attached, selectors } is prepended by the driver.
 // Selectors and page strings come only from selectors.json (R2).
 //
 // Parts are ported from Vexa-ai/vexa (Apache-2.0, https://github.com/Vexa-ai/vexa):
@@ -203,7 +203,6 @@ registerProcessor("parley-pcm",P)`;
 
   // ---- chat ---------------------------------------------------------------
   const chatSeen = new Set();
-  const sent = new Map(); // text -> time, to skip the bot's own echo
   let chatPrimed = false;
   const textOf = (n) => norm(n && n.textContent);
   const senderOf = (node) => {
@@ -230,6 +229,10 @@ registerProcessor("parley-pcm",P)`;
     return t ? t.getAttribute("aria-pressed") === "true" : !!q1(S.chatContainer);
   };
   const scanChat = () => {
+    const self = CFG.attached ? q1(S.selfMarker) : null;
+    const ownName = CFG.attached
+      ? norm(self && (self.getAttribute("data-self-name") || self.textContent))
+      : CFG.name;
     for (const node of chatNodes()) {
       const text = textOf(q1(S.chatText, node) || node);
       if (!text) continue;
@@ -238,8 +241,7 @@ registerProcessor("parley-pcm",P)`;
       if (chatSeen.has(id)) continue;
       chatSeen.add(id);
       if (!chatPrimed) continue; // what is on screen when the panel first opens is older than the bot
-      const own = !sender || sender === CFG.name || ["you"].includes(sender.toLowerCase()) || (sent.has(text) && !sender);
-      if (own) continue;
+      if (!sender || sender === ownName || sender.toLowerCase() === "you") continue;
       sendJson({ t: "chat", id, sender, text });
     }
   };
@@ -297,9 +299,17 @@ registerProcessor("parley-pcm",P)`;
     return /^turn off/i.test(btn.getAttribute("aria-label") || "");
   };
   const chatLines = () => chatNodes().map((n) => textOf(q1(S.chatText, n) || n));
+  let screenshotDocument;
 
   window.__parley = {
     state: pageState,
+    screenshotDocument: () => {
+      if (!screenshotDocument) {
+        screenshotDocument = crypto.randomUUID();
+        window.addEventListener("pagehide", () => { screenshotDocument = null; }, { capture: true, once: true });
+      }
+      return screenshotDocument;
+    },
     // The driver clicks these points with real CDP mouse events; Meet ignores script clicks on some controls.
     point: (kind) => {
       const el = {
@@ -317,7 +327,6 @@ registerProcessor("parley-pcm",P)`;
     media: () => ({ mic: muteState(q1(S.micButton)), cam: muteState(q1(S.camButton)) }),
     chatOpen: chatPanelOpen,
     chatCount: (text) => chatLines().filter((l) => l === norm(text)).length,
-    rememberSent: (text) => sent.set(norm(text), Date.now()),
     setTile: (s) => {
       tileState = s;
       draw();

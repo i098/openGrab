@@ -1,21 +1,22 @@
 //! Phase 0 exit test (plan 6.1): Join, Chat, Tile, Outsider input, fake-audio speakers.
-//! Run it through `scripts/p0-exit.sh`, which wraps it in Xvfb. One PASS or FAIL line per check.
+//! Run it through `scripts/p0-exit.sh`. One PASS or FAIL line per check.
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use parley_join::analysis::{rms, speaking_match, wav_bytes};
 use parley_join::protocol::{CallEvent, PageMsg, Participant};
-use parley_join::{Opts, Outcome, Role, Session};
+use parley_join::{Browser, Opts, Outcome, Role, Session};
 use std::collections::{BTreeMap, VecDeque};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(about = "Phase 0 exit test: Google Meet join")]
 struct Args {
-    /// The Meet link. The host must admit every guest that asks to join.
+    /// The Google Meet link.
     link: String,
-    /// Where logs, screenshots, audio and JSON go (default: <temp dir>/parley-p0-out/<epoch>).
+    /// Evidence directory. With --attach, use a new directory under a trusted parent.
     #[arg(long)]
     out: Option<PathBuf>,
     /// Pinned Chromium binary (default: the newest under ~/.local/share/opengrab/chromium).
@@ -31,6 +32,9 @@ struct Args {
     /// Persistent bot profile outside the repository. Sign in once before running the checks.
     #[arg(long)]
     profile: Option<PathBuf>,
+    /// Local remote-debugging port. See the driver README for attached tab ownership and cleanup.
+    #[arg(long)]
+    attach: Option<u16>,
     #[arg(long, default_value_t = 10)]
     chat_count: u32,
     #[arg(long, default_value_t = 600)]
@@ -117,20 +121,24 @@ fn find_chrome() -> Result<PathBuf> {
         .join("chrome-linux64/chrome"))
 }
 
+fn local_chrome(chrome: &mut Option<PathBuf>) -> Result<&Path> {
+    if chrome.is_none() {
+        *chrome = Some(find_chrome()?);
+    }
+    Ok(chrome.as_deref().unwrap())
+}
+
 /// Temporary profiles live in the temp dir (tmpfs on this host): on a slow disk Chromium stalls page loads past CDP timeouts.
 /// The bot uses `--profile` instead when given; it stays where the operator put it.
-fn launch_opts(a: &Args, chrome: &Path, tag: &str, name: &str, role: Role) -> Opts {
-    let persistent_profile = matches!(role, Role::Bot) && a.profile.is_some();
+fn launch_opts(chrome: &Path, profile: Option<&Path>, tag: &str, name: &str, role: Role) -> Opts {
     Opts {
-        chrome: chrome.into(),
-        profile: if matches!(role, Role::Bot) {
-            a.profile.clone().unwrap_or_else(|| temp_profile(tag))
-        } else {
-            temp_profile(tag)
+        browser: Browser::Launch {
+            chrome: chrome.into(),
+            profile: profile.map_or_else(|| temp_profile(tag), Path::to_path_buf),
+            persistent_profile: profile.is_some(),
         },
         name: name.into(),
         role,
-        persistent_profile,
     }
 }
 
@@ -140,19 +148,51 @@ fn temp_profile(tag: &str) -> PathBuf {
         .join(tag)
 }
 
+fn create_output_dir(out: Option<PathBuf>, attached: bool) -> Result<PathBuf> {
+    let out = out.unwrap_or_else(|| {
+        let name = if attached {
+            format!("parley-p0-out-{}-{}", now_ms(), std::process::id())
+        } else {
+            format!("parley-p0-out/{}", now_ms() / 1000)
+        };
+        std::env::temp_dir().join(name)
+    });
+    if attached {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&out)
+            .with_context(|| {
+                format!(
+                    "creating a new private evidence directory at {}",
+                    out.display()
+                )
+            })?;
+        println!("evidence: {}", out.display());
+    } else {
+        std::fs::create_dir_all(&out)?;
+    }
+    Ok(out)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let a = Args::parse();
-    if let Some(p) = &a.profile {
+    let profile = if a.attach.is_some() {
+        None
+    } else {
+        a.profile.as_deref()
+    };
+    if let Some(p) = profile {
         parley_join::check_profile(p)?;
     }
+    let bot_kind = match (a.attach, profile) {
+        (Some(_), _) => "attached",
+        (None, Some(_)) => "persistent_profile",
+        (None, None) => "guest",
+    };
     let want = |c: &str| a.checks.iter().any(|x| x == c);
-    let out = a
-        .out
-        .clone()
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("parley-p0-out/{}", now_ms() / 1000)));
-    std::fs::create_dir_all(&out)?;
-    let chrome = a.chrome.clone().map_or_else(find_chrome, Ok)?;
+    let out = create_output_dir(a.out.clone(), a.attach.is_some())?;
+    let mut chrome = a.chrome.clone();
     let mut results = Vec::new();
     let mut col = Collected::default();
 
@@ -161,21 +201,33 @@ async fn main() -> Result<()> {
     let mut bot: Option<Session> = None;
     let mut joins_log = String::new();
     for i in 1..=a.joins {
-        let mut s = Session::launch(launch_opts(
-            &a,
-            &chrome,
-            &format!("bot-{i}"),
-            &a.name,
-            Role::Bot,
-        ))
-        .await?;
+        let opts = if let Some(port) = a.attach {
+            Opts {
+                browser: Browser::Attach(port),
+                name: a.name.clone(),
+                role: Role::Bot,
+            }
+        } else {
+            launch_opts(
+                local_chrome(&mut chrome)?,
+                profile,
+                &format!("bot-{i}"),
+                &a.name,
+                Role::Bot,
+            )
+        };
+        let mut s = Session::launch(opts).await?;
         if i == 1 {
             println!("chromium: {}", s.version().await?);
         }
-        println!(
-            "join {i}/{}: asking to join as \"{}\"; the host must admit it",
-            a.joins, a.name
-        );
+        if a.attach.is_some() {
+            println!("join {i}/{}: using the attached Chromium session", a.joins);
+        } else {
+            println!(
+                "join {i}/{}: asking to join as \"{}\"; the host must admit it",
+                a.joins, a.name
+            );
+        }
         let r = s.join(&a.link, Duration::from_secs(a.join_timeout)).await?;
         let line = serde_json::json!({"n": i, "at": now_ms(), "report": r});
         joins_log += &format!("{line}\n");
@@ -221,16 +273,28 @@ async fn main() -> Result<()> {
 
     if want("tile") {
         let mut pngs = Vec::new();
+        let mut page_screenshots = true;
         for state in ["listening", "paused"] {
             bot.set_tile(state).await?;
             drain(&mut bot, Duration::from_secs(3), &mut col).await;
             let png = bot.tile_png().await?;
             std::fs::write(out.join(format!("tile-{state}.png")), &png)?;
-            bot.screenshot(&out.join(format!("page-{state}.png")))
+            page_screenshots &= bot
+                .screenshot(&out.join(format!("page-{state}.png")))
                 .await?;
             pngs.push(png);
         }
-        verdict(pngs[0] != pngs[1], "tile", "both states set and drawn (tile-*.png, page-*.png); a person must still look at the call".into(), &mut results);
+        let evidence = if page_screenshots {
+            "tile-*.png, page-*.png"
+        } else {
+            "tile-*.png"
+        };
+        verdict(
+            pngs[0] != pngs[1],
+            "tile",
+            format!("both states set and drawn ({evidence}); a person must still look at the call"),
+            &mut results,
+        );
         bot.set_tile("listening").await?;
     }
 
@@ -249,7 +313,7 @@ async fn main() -> Result<()> {
         std::fs::write(
             &file,
             serde_json::to_string_pretty(
-                &serde_json::json!({"bot_kind": if a.profile.is_some() { "persistent_profile" } else { "guest" }, "snapshots": snaps}),
+                &serde_json::json!({"bot_kind": bot_kind, "snapshots": snaps}),
             )?,
         )?;
         verdict(
@@ -265,7 +329,18 @@ async fn main() -> Result<()> {
 
     if want("speakers") {
         match &a.speakers {
-            Some(dir) => speakers(&a, &chrome, &out, dir, &mut bot, &mut col, &mut results).await?,
+            Some(dir) => {
+                speakers(
+                    &a,
+                    local_chrome(&mut chrome)?,
+                    &out,
+                    dir,
+                    &mut bot,
+                    &mut col,
+                    &mut results,
+                )
+                .await?
+            }
             None => verdict(
                 false,
                 "speakers",
@@ -358,8 +433,8 @@ async fn speakers(
             .context("speaker wav missing")?;
         s.push(
             Session::launch(launch_opts(
-                a,
                 chrome,
+                None,
                 &format!("speaker-{i}"),
                 n,
                 Role::Speaker { audio: wav },
