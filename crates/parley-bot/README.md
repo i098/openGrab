@@ -36,6 +36,7 @@ With no `--bot-authuser` the bot joins as the browser's default account. A signe
 | Speech engine | `--engine parakeet\|whisper` | | `parakeet` |
 | Speech threads | `--threads` | | `8` |
 | Browser debugging port | `--attach` | `PARLEY_ATTACH` | required |
+| Seconds to wait for admission | `--join-timeout` | | `300` |
 | Bot Google account index | `--bot-authuser` | `PARLEY_BOT_AUTHUSER` | the browser default |
 
 The model comes from `PARLEY_LLM` (`openai` or `anthropic`) and the `parley-llm` variables. With none set the bot still writes the transcript; every request gets "I could not answer that."

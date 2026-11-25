@@ -14,6 +14,7 @@ use parley_join::{Browser, Opts, Outcome, Role, Session, with_authuser};
 use parley_server::{Line, Llm, Meeting, SessionState, app, new_secret, now_ms};
 use parley_stt::{Engine, SherpaTranscriber, Transcriber, VadConfig};
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -99,22 +100,20 @@ fn spawn_stt(
         let vad = VadConfig::default();
         let mut tracks: BTreeMap<u16, SherpaTranscriber> = BTreeMap::new();
         for (track, pcm) in audio_rx {
-            if !tracks.contains_key(&track) {
-                if rms(&pcm) < 100.0 {
-                    continue;
-                }
-                match SherpaTranscriber::new(engine, &model_dir, &silero, &vad, threads) {
-                    Ok(t) => {
-                        tracks.insert(track, t);
+            let t = match tracks.entry(track) {
+                Entry::Occupied(e) => e.into_mut(),
+                Entry::Vacant(slot) => {
+                    if rms(&pcm) < 100.0 {
+                        continue;
                     }
-                    Err(e) => {
-                        eprintln!("stt: {e}; no transcript from now on");
-                        return;
+                    match SherpaTranscriber::new(engine, &model_dir, &silero, &vad, threads) {
+                        Ok(t) => slot.insert(t),
+                        Err(e) => {
+                            eprintln!("stt: {e}; no transcript from now on");
+                            return;
+                        }
                     }
                 }
-            }
-            let Some(t) = tracks.get_mut(&track) else {
-                continue;
             };
             match t.push(&pcm) {
                 Ok(segments) => {
@@ -354,7 +353,7 @@ async fn run(
         match event {
             Some(CallEvent::Audio(f)) if state == SessionState::Running => {
                 frames += 1;
-                peak = peak.max(f64::from(rms(&f.pcm)));
+                peak = peak.max(rms(&f.pcm));
                 let _ = audio_tx.send((f.track, f.pcm));
             }
             Some(CallEvent::Page(PageMsg::Speaking { names, .. })) => speaking.seen(names),
@@ -394,8 +393,10 @@ mod tests {
         let wav = std::fs::read(std::env::var("PARLEY_TEST_WAV").unwrap()).unwrap();
         let at = wav.windows(4).position(|w| w == b"data").unwrap() + 8;
         let mut pcm: Vec<i16> = wav[at..]
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes(*b))
             .collect();
         pcm.extend(vec![0; 16_000 * 2]); // trailing silence closes the last segment
         let a = Args::parse_from(["parley", "--attach", "9523", "https://meet.google.com/x"]);
