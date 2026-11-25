@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
+flate2 = "1"
 parley-artifacts = { path = "../parley-artifacts" }
 parley-brain = { path = "../parley-brain" }
 parley-llm = { path = "../parley-llm" }
