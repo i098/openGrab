@@ -24,9 +24,9 @@ pub const NODE_WIDTH: f64 = 180.0;
 // shortcut: long labels can extend outside the fixed 160 × 25 text box; revisit if labels must fit inside nodes.
 pub const NODE_HEIGHT: f64 = 80.0;
 /// Horizontal space between layers.
-pub const LAYER_GAP: f64 = 120.0;
+pub const LAYER_GAP: f64 = 220.0;
 /// Vertical space between rows.
-pub const ROW_GAP: f64 = 48.0;
+pub const ROW_GAP: f64 = 72.0;
 /// Space between the top member of a group and its label above it.
 pub const GROUP_LABEL_OFFSET: f64 = 30.0;
 /// Name of the root `Y.Map`, read and written by the web round trip.
@@ -301,18 +301,34 @@ impl Board {
 
         for (i, edge) in self.edges.iter().enumerate() {
             let (from, to) = (layout.node(&edge.from)?, layout.node(&edge.to)?);
-            let (sx, sy, ex, ey) = arrow_ends(from, to);
+            let route = route(from, to, &layout.nodes);
+            let (sx, sy) = route[0];
+            let xs = route.iter().map(|p| p.0);
+            let ys = route.iter().map(|p| p.1);
+            let width = xs.clone().fold(f64::MIN, f64::max) - xs.fold(f64::MAX, f64::min);
+            let height = ys.clone().fold(f64::MIN, f64::max) - ys.fold(f64::MAX, f64::min);
             let mut arrow = base(
                 &format!("edge:{i}"),
                 "arrow",
                 sx,
                 sy,
-                (ex - sx).abs(),
-                (ey - sy).abs(),
+                width,
+                height,
                 "transparent",
             );
-            arrow.insert("roundness".into(), json!({"type": 2}));
-            arrow.insert("points".into(), json!([[0, 0], [ex - sx, ey - sy]]));
+            // A rounded multi-point arrow is a spline that can cut through the node it avoids.
+            arrow.insert(
+                "roundness".into(),
+                if route.len() == 2 {
+                    json!({"type": 2})
+                } else {
+                    Value::Null
+                },
+            );
+            arrow.insert(
+                "points".into(),
+                Value::Array(route.iter().map(|p| json!([p.0 - sx, p.1 - sy])).collect()),
+            );
             arrow.insert("lastCommittedPoint".into(), Value::Null);
             arrow.insert(
                 "startBinding".into(),
@@ -331,13 +347,15 @@ impl Board {
                 .as_deref()
                 .filter(|label| !label.trim().is_empty())
             {
+                let (mx, my) = label_anchor(&route);
+                let mask = label_width(label);
                 arrow_bound.push(json!({"type": "text", "id": format!("edge-text:{i}")}));
                 out.push(bound_text(
                     &format!("edge-text:{i}"),
                     label,
-                    (sx + ex) / 2.0 - 50.0,
-                    (sy + ey) / 2.0 - 20.0,
-                    100.0,
+                    mx - mask / 2.0,
+                    my - 20.0,
+                    mask,
                     20.0,
                     16,
                     Some(format!("edge:{i}")),
@@ -441,6 +459,82 @@ impl Layout {
             .find(|n| n.id == id)
             .ok_or_else(|| Error::Invalid(format!("unknown node {id:?}")))
     }
+}
+
+/// Arrow points from `from` to `to`: straight, or around the nodes between them.
+///
+/// Try a lane above both nodes, then a lane right of both. The lanes run in the gaps between
+/// rows and layers, which no node occupies. Fall back to the straight line when no lane is clear.
+fn route(from: &Placed, to: &Placed, nodes: &[Placed]) -> Vec<(f64, f64)> {
+    let (sx, sy, ex, ey) = arrow_ends(from, to);
+    let others = || nodes.iter().filter(|n| n.id != from.id && n.id != to.id);
+    let clear = |pts: &[(f64, f64)]| {
+        pts.windows(2)
+            .all(|w| others().all(|n| !crosses(w[0], w[1], n)))
+    };
+    let straight = vec![(sx, sy), (ex, ey)];
+    if clear(&straight) {
+        return straight;
+    }
+    let lane_y = from.y.min(to.y) - ROW_GAP / 2.0;
+    let top = vec![
+        (from.x + from.width / 2.0, from.y),
+        (from.x + from.width / 2.0, lane_y),
+        (to.x + to.width / 2.0, lane_y),
+        (to.x + to.width / 2.0, to.y),
+    ];
+    let lane_x = (from.x + from.width).max(to.x + to.width) + LAYER_GAP / 2.0;
+    let side = vec![
+        (from.x + from.width, from.y + from.height / 2.0),
+        (lane_x, from.y + from.height / 2.0),
+        (lane_x, to.y + to.height / 2.0),
+        (to.x + to.width, to.y + to.height / 2.0),
+    ];
+    // A same-row arrow goes over the top; a same-column arrow goes along the side.
+    let candidates = if (from.y - to.y).abs() < NODE_HEIGHT {
+        [top, side]
+    } else {
+        [side, top]
+    };
+    candidates
+        .into_iter()
+        .find(|c| clear(c))
+        .unwrap_or(straight)
+}
+
+/// Whether the segment `a`-`b` passes through the rectangle of `n`.
+fn crosses(a: (f64, f64), b: (f64, f64), n: &Placed) -> bool {
+    let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+    for (p, d, lo, hi) in [
+        (a.0, b.0 - a.0, n.x, n.x + n.width),
+        (a.1, b.1 - a.1, n.y, n.y + n.height),
+    ] {
+        if d == 0.0 {
+            if p < lo || p > hi {
+                return false;
+            }
+        } else {
+            let (u, v) = ((lo - p) / d, (hi - p) / d);
+            t0 = t0.max(u.min(v));
+            t1 = t1.min(u.max(v));
+        }
+    }
+    t0 <= t1
+}
+
+/// Width of the label mask in pixels at font size 16: about 10 px a character, plus padding.
+fn label_width(label: &str) -> f64 {
+    label.chars().count() as f64 * 10.0 + 16.0
+}
+
+/// Middle of the longest segment, where the label mask hides the least of the shaft.
+fn label_anchor(route: &[(f64, f64)]) -> (f64, f64) {
+    let len = |w: &[(f64, f64)]| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1);
+    let w = route
+        .windows(2)
+        .max_by(|a, b| len(a).total_cmp(&len(b)))
+        .expect("a route has two points");
+    ((w[0].0 + w[1].0) / 2.0, (w[0].1 + w[1].1) / 2.0)
 }
 
 fn arrow_ends(from: &Placed, to: &Placed) -> (f64, f64, f64, f64) {
@@ -962,5 +1056,119 @@ mod tests {
         let root = raw.get_or_insert_map("board");
         let txn = raw.transact();
         assert!(matches!(root.get(&txn, "elements"), Some(Out::YArray(_))));
+    }
+
+    fn chain(edges: &[(&str, &str, Option<&str>)], ids: &[&str]) -> Vec<Value> {
+        Board {
+            nodes: ids
+                .iter()
+                .map(|id| Node {
+                    id: (*id).into(),
+                    label: (*id).into(),
+                })
+                .collect(),
+            edges: edges
+                .iter()
+                .map(|(from, to, label)| Edge {
+                    from: (*from).into(),
+                    to: (*to).into(),
+                    label: label.map(Into::into),
+                })
+                .collect(),
+            groups: Vec::new(),
+        }
+        .elements()
+        .unwrap()
+    }
+
+    fn abs_points(arrow: &Value) -> Vec<(f64, f64)> {
+        let (x, y) = (arrow["x"].as_f64().unwrap(), arrow["y"].as_f64().unwrap());
+        arrow["points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (x + p[0].as_f64().unwrap(), y + p[1].as_f64().unwrap()))
+            .collect()
+    }
+
+    fn rect(elements: &[Value], id: &str) -> Placed {
+        let e = elements.iter().find(|e| e["id"] == id).unwrap();
+        Placed {
+            id: id.into(),
+            x: e["x"].as_f64().unwrap(),
+            y: e["y"].as_f64().unwrap(),
+            width: e["width"].as_f64().unwrap(),
+            height: e["height"].as_f64().unwrap(),
+        }
+    }
+
+    #[test]
+    fn arrows_route_around_a_node_in_the_same_row_or_column() {
+        // a, b, c share a row: a->c would cross b.
+        let row = chain(
+            &[("a", "b", None), ("b", "c", None), ("a", "c", None)],
+            &["a", "b", "c"],
+        );
+        // A group puts x, y, z in one column: x->z would cross y.
+        let mut board = Board {
+            nodes: ["x", "y", "z"]
+                .iter()
+                .map(|id| Node {
+                    id: (*id).into(),
+                    label: (*id).into(),
+                })
+                .collect(),
+            edges: vec![Edge {
+                from: "x".into(),
+                to: "z".into(),
+                label: None,
+            }],
+            groups: Vec::new(),
+        };
+        board.groups.push(Group {
+            id: "g".into(),
+            label: "G".into(),
+            members: vec!["x".into(), "y".into(), "z".into()],
+        });
+        let column = board.elements().unwrap();
+        for (elements, blocker, edge) in [(&row, "node:b", "edge:2"), (&column, "node:y", "edge:0")]
+        {
+            let arrow = elements.iter().find(|e| e["id"] == edge).unwrap();
+            let points = abs_points(arrow);
+            assert!(points.len() > 2, "{edge} is routed");
+            let n = rect(elements, blocker);
+            for w in points.windows(2) {
+                assert!(!crosses(w[0], w[1], &n), "{edge} crosses {blocker}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_label_leaves_the_arrow_shaft_visible() {
+        let elements = chain(
+            &[
+                ("a", "b", Some("ready")),
+                ("b", "c", Some("ok")),
+                ("a", "c", Some("skip")),
+            ],
+            &["a", "b", "c"],
+        );
+        for i in 0..3 {
+            let arrow = elements
+                .iter()
+                .find(|e| e["id"] == format!("edge:{i}"))
+                .unwrap();
+            let points = abs_points(arrow);
+            let longest = points
+                .windows(2)
+                .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+                .fold(0.0, f64::max);
+            // The label mask sits on the middle of the longest segment. Leave room for a 40 px move.
+            let mask = label_width(["ready", "ok", "skip"][i]);
+            assert!(
+                longest >= mask + 2.0 * 24.0 + 40.0,
+                "edge {i} shaft {longest}"
+            );
+        }
     }
 }

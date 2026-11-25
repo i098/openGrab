@@ -302,6 +302,9 @@ impl Session {
 
     /// Open the Meet link and wait for the call UI, a terminal page state, or a timeout.
     pub async fn join(&mut self, url: &str, timeout: Duration) -> Result<JoinReport> {
+        if self.attached() {
+            check_call_link(url)?;
+        }
         let start = Instant::now();
         self.navigate(url).await;
         let mut ready = false;
@@ -561,6 +564,22 @@ impl Drop for Session {
     }
 }
 
+/// Attach mode saves page state, so refuse a Meet page that is not one call, such as the home page.
+fn check_call_link(url: &str) -> Result<()> {
+    let code = url
+        .strip_prefix("https://meet.google.com/")
+        .map(|rest| rest.split(['?', '#']).next().unwrap_or_default());
+    let is_code = |c: &str| {
+        let parts: Vec<_> = c.split('-').map(str::len).collect();
+        parts == [3, 4, 3] && c.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')
+    };
+    anyhow::ensure!(
+        code.is_some_and(is_code),
+        "attach mode needs a call link like https://meet.google.com/abc-defg-hij"
+    );
+    Ok(())
+}
+
 struct OwnedTab {
     port: u16,
     id: Option<String>,
@@ -568,14 +587,28 @@ struct OwnedTab {
 
 impl OwnedTab {
     async fn create(cdp: &Cdp, port: u16) -> Result<Self> {
-        let reply = cdp
+        let before = page_targets(cdp).await?;
+        let reply = match cdp
             .call(None, "Target.createTarget", json!({"url": "about:blank"}))
-            .await?;
+            .await
+        {
+            Ok(reply) => reply,
+            Err(error) => {
+                // The reply can be lost after Chromium made the tab. Close the one new blank tab.
+                if let Ok(after) = page_targets(cdp).await {
+                    let mut new = after
+                        .into_iter()
+                        .filter(|(id, url)| url == "about:blank" && !before.contains_key(id));
+                    if let (Some((id, _)), None) = (new.next(), new.next()) {
+                        drop(Self { port, id: Some(id) });
+                    }
+                }
+                return Err(error);
+            }
+        };
         let id = reply["targetId"]
             .as_str()
-            .filter(|id| {
-                !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            })
+            .filter(|id| valid_target_id(id))
             .context("no valid target id for the new tab")?;
         Ok(Self {
             port,
@@ -584,43 +617,111 @@ impl OwnedTab {
     }
 
     fn close(&mut self) -> Result<()> {
-        use std::io::{BufRead, BufReader, Write};
-        use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+        use std::net::{Ipv4Addr, SocketAddr};
 
-        let Some(id) = self.id.as_deref() else {
+        let Some(id) = self.id.clone() else {
             return Ok(());
         };
         let deadline = Instant::now() + Duration::from_secs(20);
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, self.port));
-        let mut status = String::new();
-        loop {
-            let time_left = deadline.saturating_duration_since(Instant::now());
+        let time_left = || {
+            let left = deadline.saturating_duration_since(Instant::now());
+            anyhow::ensure!(!left.is_zero(), "Chromium did not confirm closing tab {id}");
+            Ok(left)
+        };
+        // Closing the last tab can close the browser: open a blank tab first.
+        let (_, list) = http(addr, "GET", "/json/list", time_left()?)?;
+        let pages: Vec<Value> = serde_json::from_str::<Vec<Value>>(&list)?
+            .into_iter()
+            .filter(|t| t["type"] == "page")
+            .collect();
+        if !pages.iter().any(|t| t["id"] == id.as_str()) {
+            self.id = None;
+            return Ok(());
+        }
+        if pages.len() == 1 {
+            let (status, _) = http(addr, "PUT", "/json/new?about:blank", time_left()?)?;
             anyhow::ensure!(
-                !time_left.is_zero(),
-                "Chromium did not confirm closing tab {id}"
+                status == "200",
+                "Chromium did not open a spare tab ({status}); tab {id} stays open"
             );
-            let mut stream = TcpStream::connect_timeout(&addr, time_left)?;
-            stream.set_read_timeout(Some(time_left))?;
-            stream.set_write_timeout(Some(time_left))?;
-            write!(
-                stream,
-                "GET /json/close/{id} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
-            )?;
-            status.clear();
-            BufReader::new(stream).read_line(&mut status)?;
-            match status.split_ascii_whitespace().nth(1) {
-                Some("404") => {
+        }
+        loop {
+            let (status, _) = http(addr, "GET", &format!("/json/close/{id}"), time_left()?)?;
+            match status.as_str() {
+                "404" => {
                     self.id = None;
                     return Ok(());
                 }
-                Some("200") => std::thread::sleep(Duration::from_millis(100)),
-                _ => bail!(
-                    "Chromium did not accept closing tab {id}: {}",
-                    status.trim()
-                ),
+                "200" => std::thread::sleep(Duration::from_millis(100)),
+                _ => bail!("Chromium did not accept closing tab {id}: HTTP {status}"),
             }
         }
     }
+}
+
+fn valid_target_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// Page targets as id to URL.
+async fn page_targets(cdp: &Cdp) -> Result<std::collections::HashMap<String, String>> {
+    let reply = cdp.call(None, "Target.getTargets", json!({})).await?;
+    Ok(reply["targetInfos"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| t["type"] == "page")
+        .filter_map(|t| {
+            Some((
+                t["targetId"].as_str()?.to_owned(),
+                t["url"].as_str()?.to_owned(),
+            ))
+        })
+        .filter(|(id, _)| valid_target_id(id))
+        .collect())
+}
+
+/// One blocking request to the Chromium debugging port. Return the status code and the body.
+fn http(
+    addr: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    time_left: Duration,
+) -> Result<(String, String)> {
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, time_left)?;
+    stream.set_read_timeout(Some(time_left))?;
+    stream.set_write_timeout(Some(time_left))?;
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )?;
+    // Chromium can keep the socket open after the reply, so read the body by its length.
+    let mut reader = BufReader::new(stream);
+    let mut status = String::new();
+    reader.read_line(&mut status)?;
+    let status = status
+        .split_ascii_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .to_owned();
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 || line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse()?;
+        }
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    Ok((status, String::from_utf8(body)?))
 }
 
 impl Drop for OwnedTab {
@@ -943,29 +1044,38 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[tokio::test]
-    async fn attached_tab_drop_waits_for_its_target_to_disappear() {
+    /// Serve one HTTP reply per `(request line, status, body)`, in order.
+    async fn mock_debug_port(
+        replies: Vec<(&'static str, &'static str, &'static str)>,
+    ) -> (u16, super::JoinHandle<()>) {
         use super::*;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let browser = tokio::spawn(async move {
-            for status in ["200 OK", "404 Not Found"] {
+            for (request, status, body) in replies {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut stream = BufReader::new(stream);
                 let mut line = String::new();
                 stream.read_line(&mut line).await.unwrap();
-                assert_eq!(line, "GET /json/close/owned-tab HTTP/1.1\r\n");
+                assert_eq!(line, format!("{request} HTTP/1.1\r\n"));
                 while line != "\r\n" {
                     line.clear();
                     assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
                 }
-                let reply = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
-                let stream = stream.get_mut();
-                stream.write_all(reply.as_bytes()).await.unwrap();
+                let reply = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.get_mut().write_all(reply.as_bytes()).await.unwrap();
             }
         });
+        (port, browser)
+    }
+
+    async fn drop_tab(port: u16, browser: super::JoinHandle<()>) {
+        use super::*;
         tokio::task::spawn_blocking(move || {
             drop(OwnedTab {
                 port,
@@ -978,6 +1088,50 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn attached_tab_drop_waits_for_its_target_to_disappear() {
+        let two = r#"[{"id":"owned-tab","type":"page"},{"id":"user-tab","type":"page"}]"#;
+        let (port, browser) = mock_debug_port(vec![
+            ("GET /json/list", "200 OK", two),
+            ("GET /json/close/owned-tab", "200 OK", ""),
+            ("GET /json/close/owned-tab", "404 Not Found", ""),
+        ])
+        .await;
+        drop_tab(port, browser).await;
+    }
+
+    #[tokio::test]
+    async fn closing_the_last_tab_opens_a_spare_tab_first() {
+        let one = r#"[{"id":"owned-tab","type":"page"},{"id":"w","type":"service_worker"}]"#;
+        let (port, browser) = mock_debug_port(vec![
+            ("GET /json/list", "200 OK", one),
+            ("PUT /json/new?about:blank", "200 OK", "{}"),
+            ("GET /json/close/owned-tab", "404 Not Found", ""),
+        ])
+        .await;
+        drop_tab(port, browser).await;
+    }
+
+    #[test]
+    fn attach_mode_accepts_only_call_links() {
+        for ok in [
+            "https://meet.google.com/abc-defg-hij",
+            "https://meet.google.com/abc-defg-hij?authuser=0",
+        ] {
+            assert!(super::check_call_link(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "https://meet.google.com/",
+            "https://meet.google.com/landing",
+            "https://meet.google.com/new",
+            "https://meet.google.com/abc-defg-hij/extra",
+            "http://meet.google.com/abc-defg-hij",
+            "https://meet.google.com.evil.example/abc-defg-hij",
+        ] {
+            assert!(super::check_call_link(bad).is_err(), "{bad}");
+        }
     }
 
     #[tokio::test]
