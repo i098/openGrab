@@ -1,7 +1,10 @@
 //! Meeting page server. One meeting, one secret URL `/m/<secret>`.
-//! The server owns the state (running, paused, removed) and keeps only transcript text in memory.
+//! The server owns the state (running, paused, removed) and keeps only transcript text and the live doc in memory.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 use axum::{
     Json, Router,
@@ -14,11 +17,25 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use parley_artifacts::{Artifact, Span};
 use serde::Serialize;
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, mpsc};
 
 const PAGE: &str = include_str!("../../../web/index.html");
+/// Built from `web/editor` with `bun run build`.
+const EDITOR_JS: &str = include_str!("../../../web/editor.js");
+/// Largest Yjs update one client may send.
+const MAX_DOC_MESSAGE: usize = 1 << 20;
+
+/// A Yjs update and the id of the client that sent it (0 for the server).
+#[derive(Clone)]
+enum DocEvent {
+    /// A Yjs update with the id of the client that sent it (0 for the server).
+    Update(u64, Arc<Vec<u8>>),
+    /// The meeting was removed: close the socket.
+    Closed,
+}
 
 /// One transcript line.
 #[derive(Clone, Debug, Serialize)]
@@ -54,6 +71,10 @@ pub struct Meeting {
     secret: String,
     inner: Mutex<Inner>,
     events: broadcast::Sender<Event>,
+    /// The live doc, None once removed. Held while an update is applied and sent, so a joiner misses none.
+    doc: Mutex<Option<Artifact>>,
+    doc_events: broadcast::Sender<DocEvent>,
+    next_client: AtomicU64,
 }
 
 /// 128 random bits from the OS, URL-safe base64 (22 characters).
@@ -72,6 +93,9 @@ impl Meeting {
                 lines: Vec::new(),
             }),
             events: broadcast::channel(1024).0,
+            doc: Mutex::new(Some(Artifact::new())),
+            doc_events: broadcast::channel(1024).0,
+            next_client: AtomicU64::new(1),
         })
     }
 
@@ -110,12 +134,15 @@ impl Meeting {
         self.transition(SessionState::Paused, SessionState::Running)
     }
 
-    /// Remove: final. Drops the transcript from memory.
+    /// Remove: final. Drops the transcript and the live doc from memory.
     pub fn remove(&self) -> SessionState {
         let mut g = self.inner.lock().unwrap();
         if g.state != SessionState::Removed {
             g.state = SessionState::Removed;
             g.lines = Vec::new();
+            let mut doc = self.doc.lock().unwrap();
+            *doc = None;
+            let _ = self.doc_events.send(DocEvent::Closed);
             let _ = self.events.send(Event::State {
                 state: SessionState::Removed,
             });
@@ -139,6 +166,47 @@ impl Meeting {
         (hello.to_string(), self.events.subscribe())
     }
 
+    /// Server-side edit of the live doc; every open page shows it at once.
+    pub fn append_paragraph(&self, text: &str) {
+        let guard = self.doc.lock().unwrap();
+        let Some(doc) = guard.as_ref() else { return };
+        doc.append_paragraph(&[Span::plain(text)]);
+        // The full state is a valid update for every client: Yjs ignores what it has.
+        let _ = self
+            .doc_events
+            .send(DocEvent::Update(0, Arc::new(doc.encode_update())));
+    }
+
+    /// The live doc as Tiptap JSON.
+    pub fn doc_json(&self) -> serde_json::Value {
+        self.doc
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|d| d.to_json().ok())
+            .unwrap_or_default()
+    }
+
+    /// Apply a client update and pass it on. Err means the update is invalid.
+    fn doc_update(&self, from: u64, update: Vec<u8>) -> Result<(), parley_artifacts::Error> {
+        let guard = self.doc.lock().unwrap();
+        let Some(doc) = guard.as_ref() else {
+            return Ok(());
+        };
+        doc.apply_update(&update)?;
+        let _ = self
+            .doc_events
+            .send(DocEvent::Update(from, Arc::new(update)));
+        Ok(())
+    }
+
+    /// Full state and live updates, taken under one lock. None once removed.
+    fn doc_subscribe(&self) -> Option<(Vec<u8>, broadcast::Receiver<DocEvent>)> {
+        let guard = self.doc.lock().unwrap();
+        let doc = guard.as_ref()?;
+        Some((doc.encode_update(), self.doc_events.subscribe()))
+    }
+
     /// Copy of the kept lines.
     pub fn lines(&self) -> Vec<Line> {
         self.inner.lock().unwrap().lines.clone()
@@ -157,6 +225,8 @@ pub fn app(meeting: Arc<Meeting>) -> (Router, mpsc::Sender<Line>) {
     let router = Router::new()
         .route("/m/{secret}", get(page))
         .route("/m/{secret}/ws", get(ws))
+        .route("/m/{secret}/editor.js", get(editor_js))
+        .route("/m/{secret}/doc/ws", get(doc_ws))
         .route("/m/{secret}/{action}", post(action))
         .with_state(meeting);
     (router, tx)
@@ -174,6 +244,72 @@ async fn page(State(m): State<Arc<Meeting>>, Path(secret): Path<String>) -> Resp
     match authorize(&m, &secret) {
         Ok(()) => Html(PAGE).into_response(),
         Err(c) => c.into_response(),
+    }
+}
+
+async fn editor_js(State(m): State<Arc<Meeting>>, Path(secret): Path<String>) -> Response {
+    match authorize(&m, &secret) {
+        Ok(()) => ([("content-type", "text/javascript")], EDITOR_JS).into_response(),
+        Err(c) => c.into_response(),
+    }
+}
+
+async fn doc_ws(
+    State(m): State<Arc<Meeting>>,
+    Path(secret): Path<String>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    match authorize(&m, &secret) {
+        Ok(()) if m.state() == SessionState::Removed => StatusCode::NOT_FOUND.into_response(),
+        Ok(()) => upgrade
+            .max_message_size(MAX_DOC_MESSAGE)
+            .on_upgrade(move |s| doc_feed(s, m)),
+        Err(c) => c.into_response(),
+    }
+}
+
+async fn doc_feed(mut socket: WebSocket, m: Arc<Meeting>) {
+    let id = m.next_client.fetch_add(1, Ordering::Relaxed);
+    let Some((state, mut rx)) = m.doc_subscribe() else {
+        return;
+    };
+    if socket.send(Message::binary(state)).await.is_err() {
+        return;
+    }
+    loop {
+        tokio::select! {
+            ev = rx.recv() => match ev {
+                Ok(DocEvent::Update(from, update)) => {
+                    if from != id && socket.send(Message::binary(update.to_vec())).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(DocEvent::Closed) => {
+                    let _ = socket.send(Message::Close(None)).await;
+                    return;
+                }
+                // Missed updates: resend the full state.
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let Some((state, r)) = m.doc_subscribe() else {
+                        return;
+                    };
+                    rx = r;
+                    if socket.send(Message::binary(state)).await.is_err() {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Binary(b))) => {
+                    if m.doc_update(id, b.to_vec()).is_err() {
+                        return;
+                    }
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                Some(Ok(_)) => {}
+            },
+        }
     }
 }
 

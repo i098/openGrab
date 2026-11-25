@@ -115,3 +115,77 @@ async fn websocket_receives_a_line_and_state() {
     };
     assert!(t.contains("\"paused\""));
 }
+
+#[tokio::test]
+async fn live_doc_converges_for_two_clients_and_a_server_edit() {
+    use parley_artifacts::{Artifact, Span};
+    let m = Meeting::new(new_secret());
+    let sec = m.secret().to_string();
+    let (addr, _tx) = serve(m.clone()).await;
+    let url = format!("ws://{addr}/m/{sec}/doc/ws");
+    assert!(
+        tokio_tungstenite::connect_async(format!("ws://{addr}/m/wrong/doc/ws"))
+            .await
+            .is_err()
+    );
+    let (mut a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let local_a = Artifact::new();
+    let local_b = Artifact::new();
+    for (ws, local) in [(&mut a, &local_a), (&mut b, &local_b)] {
+        let Message::Binary(s) = ws.next().await.unwrap().unwrap() else {
+            panic!("binary")
+        };
+        local.apply_update(&s).unwrap();
+    }
+
+    // Client A types; client B receives it.
+    use futures_util::SinkExt;
+    let typed = Artifact::new();
+    typed.append_paragraph(&[Span::plain("from a")]);
+    a.send(Message::binary(typed.encode_update()))
+        .await
+        .unwrap();
+    let Message::Binary(u) = b.next().await.unwrap().unwrap() else {
+        panic!("binary")
+    };
+    local_b.apply_update(&u).unwrap();
+
+    // Server edit reaches both.
+    m.append_paragraph("from server");
+    for (ws, local) in [(&mut a, &local_a), (&mut b, &local_b)] {
+        let Message::Binary(u) = ws.next().await.unwrap().unwrap() else {
+            panic!("binary")
+        };
+        local.apply_update(&u).unwrap();
+    }
+    local_a.apply_update(&typed.encode_update()).unwrap();
+
+    let want = m.doc_json();
+    assert_eq!(local_a.to_json().unwrap(), want);
+    assert_eq!(local_b.to_json().unwrap(), want);
+    let text = want.to_string();
+    assert!(text.contains("from a") && text.contains("from server"));
+}
+
+#[tokio::test]
+async fn removed_meeting_closes_doc_sockets_and_refuses_new_ones() {
+    let m = Meeting::new(new_secret());
+    let sec = m.secret().to_string();
+    let (addr, _tx) = serve(m.clone()).await;
+    let url = format!("ws://{addr}/m/{sec}/doc/ws");
+    let (mut a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    a.next().await.unwrap().unwrap();
+    m.append_paragraph("secret words");
+    a.next().await.unwrap().unwrap();
+    assert!(m.doc_json().to_string().contains("secret words"));
+
+    m.remove();
+
+    assert!(matches!(
+        a.next().await,
+        Some(Ok(Message::Close(_))) | Some(Err(_)) | None
+    ));
+    assert!(tokio_tungstenite::connect_async(&url).await.is_err());
+    assert!(!m.doc_json().to_string().contains("secret words"));
+}
