@@ -15,6 +15,8 @@
   #lines li { padding: .3rem 0; border-bottom: 1px solid #ddd; }
   .who { font-weight: 600; }
   .at { color: #777; font-size: .85rem; margin-left: .5rem; }
+  #doc { border: 1px solid #ccc; border-radius: 4px; padding: 0 .8rem; margin: 1rem 0; min-height: 4rem; }
+  #doc .ProseMirror { outline: none; min-height: 4rem; }
   #ended { display: none; font-weight: 600; padding: 1rem 0; }
 </style>
 </head>
@@ -27,6 +29,7 @@
   <button id="remove" type="button">Remove</button>
 </header>
 <p id="ended">This meeting session was removed. The transcript is deleted.</p>
+<div id="doc" aria-label="Live document"></div>
 <ul id="lines" aria-live="polite"></ul>
 <script>
 "use strict";
@@ -91,6 +94,10 @@ for (const a of ["pause", "resume", "remove"]) {
 setState("running");
 $("status").textContent = "Connecting…";
 connect();
+const ed = document.createElement("script");
+ed.src = `${base}/editor.js`;
+ed.type = "module";
+document.body.append(ed);
 </script>
 </body>
 </html>

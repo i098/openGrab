@@ -1,5 +1,6 @@
 //! `page_demo <transcript-file>`: serve the meeting page and feed one line about every 2 seconds.
 //! File lines look like `Speaker: text`; a line with no speaker gets the name "Speaker".
+//! Each line typed on stdin is appended to the live doc as a paragraph (the server-side edit).
 //! Set `PAGE_DEMO_ADDR` (default 127.0.0.1:8080) and `PAGE_DEMO_BASE` (default http://<addr>).
 
 use std::time::Duration;
@@ -17,7 +18,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let meeting = Meeting::new(new_secret());
     let url = format!("{base}/m/{}", meeting.secret());
+    let doc_meeting = meeting.clone();
     let (router, tx) = app(meeting);
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+        while let Ok(Some(l)) = lines.next_line().await {
+            doc_meeting.append_paragraph(&l);
+        }
+    });
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("{url}");
 

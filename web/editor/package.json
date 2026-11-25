@@ -1,0 +1,14 @@
+{
+  "name": "meeting-editor",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "bun build editor.ts --minify --outfile ../editor.js" },
+  "dependencies": {
+    "@tiptap/core": "^3.35.0",
+    "@tiptap/extension-collaboration": "^3.35.0",
+    "@tiptap/pm": "^3.35.0",
+    "@tiptap/starter-kit": "^3.35.0",
+    "y-prosemirror": "^1.2.12",
+    "yjs": "^13.6.0"
+  }
+}
