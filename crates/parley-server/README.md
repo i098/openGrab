@@ -7,7 +7,6 @@ One meeting page with a live transcript. The server owns the state (running, pau
 - `GET /m/<secret>/doc/ws` and `/board/ws` sync the live doc and the whiteboard: binary WebSocket frames, full Yjs state first, then raw updates both ways (1 MiB cap, 404 on a wrong secret or after remove). `Meeting::set_board` lays out a board model and replaces the whiteboard for every open page. The page bundle `web/board.js` is built from `web/board` with `bun run build`.
 - `POST /m/<secret>/pause`, `/resume` and `/remove` change the state and answer `{"state": ...}`. Pause works only from running, resume only from paused. Remove is final: it drops the transcript and the page says the session was removed.
 - `app(meeting)` returns the router and one `mpsc::Sender<Line>`. Every transcript source feeds lines through that channel. A line that arrives while paused or removed is dropped.
-
 - `Meeting::request(llm, name, text)` answers a request line ("Parley, start a doc for the launch plan"). It runs `parley_brain` `write_doc` on a copy of the live doc with the transcript so far, then applies the result as one update, so every open page shows it with no reload. It returns the chat line. A failed model call or a bad tool call returns an error and leaves the doc unchanged. Text that is no request returns `None`.
 - `Llm::from_env()` picks the model from `PARLEY_LLM` (`openai` or `anthropic`, then the `parley-llm` variables). There is no default: unset is an error and the doc stays unchanged.
 
