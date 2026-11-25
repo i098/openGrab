@@ -1,5 +1,5 @@
 //! Meeting page server. One meeting, one secret URL `/m/<secret>`.
-//! The server owns the state (running, paused, removed) and keeps only transcript text in memory.
+//! The server owns the state (running, paused, removed) and keeps only transcript text and the live doc in memory.
 
 use std::sync::{
     Arc, Mutex,
