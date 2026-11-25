@@ -13,6 +13,7 @@ use std::{
 use parley_artifacts::board::{Board, BoardDoc, Edge, Group, Node};
 use serde_json::Value;
 
+const MOVE_NODE: &str = "store";
 const MOVE_X: f64 = 40.0;
 const MOVE_Y: f64 = 20.0;
 const TOLERANCE: f64 = 1e-6;
@@ -38,16 +39,16 @@ fn sample() -> Board {
     Board {
         nodes: vec![
             Node {
+                id: MOVE_NODE.into(),
+                label: "Store".into(),
+            },
+            Node {
                 id: "intake".into(),
                 label: "Intake".into(),
             },
             Node {
                 id: "parse".into(),
                 label: "Parse".into(),
-            },
-            Node {
-                id: "store".into(),
-                label: "Store".into(),
             },
             Node {
                 id: "report".into(),
@@ -117,6 +118,70 @@ fn ends(arrow: &Value) -> Option<((f64, f64), (f64, f64))> {
     Some((point(points.first()?)?, point(points.last()?)?))
 }
 
+fn fixture_labels_match(board: &Board, elements: &[Value]) -> bool {
+    let label_matches =
+        |id: &str, label: &str, owner: Option<(&str, &str)>, group_id: Option<&str>| {
+            let Ok(text) = element(elements, id) else {
+                return false;
+            };
+            text["type"] == "text"
+                && text["isDeleted"] == false
+                && text["text"] == label
+                && text["originalText"] == label
+                && match owner {
+                    Some((owner_id, kind)) => {
+                        text["containerId"] == owner_id
+                            && element(elements, owner_id).is_ok_and(|owner| {
+                                owner["type"] == kind
+                                    && owner["boundElements"].as_array().is_some_and(|bindings| {
+                                        bindings
+                                            .iter()
+                                            .any(|b| b["type"] == "text" && b["id"] == id)
+                                    })
+                            })
+                    }
+                    None => text["containerId"].is_null(),
+                }
+                && group_id.is_none_or(|group_id| {
+                    text["groupIds"]
+                        .as_array()
+                        .is_some_and(|ids| ids.len() == 1 && ids[0] == group_id)
+                })
+        };
+
+    let mut labeled_edges = board
+        .edges
+        .iter()
+        .enumerate()
+        .filter_map(|(i, edge)| edge.label.as_deref().map(|label| (i, label)));
+    elements.iter().filter(|e| e["type"] == "text").count()
+        == board.nodes.len() + board.groups.len() + labeled_edges.clone().count()
+        && board.nodes.iter().all(|node| {
+            label_matches(
+                &format!("text:{}", node.id),
+                &node.label,
+                Some((&format!("node:{}", node.id), "rectangle")),
+                None,
+            )
+        })
+        && labeled_edges.all(|(i, label)| {
+            label_matches(
+                &format!("edge-text:{i}"),
+                label,
+                Some((&format!("edge:{i}"), "arrow")),
+                None,
+            )
+        })
+        && board.groups.iter().all(|group| {
+            label_matches(
+                &format!("label:{}", group.id),
+                &group.label,
+                None,
+                Some(&format!("group:{}", group.id)),
+            )
+        })
+}
+
 fn run() -> Result<bool, Box<dyn std::error::Error>> {
     let board = sample();
     let elements = board.elements()?;
@@ -130,6 +195,9 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
     let doc = BoardDoc::new();
     doc.set_elements(&elements);
     let before = doc.elements()?;
+    if !fixture_labels_match(&board, &before) {
+        return Err("seed labels do not match the fixture".into());
+    }
 
     // DirBuilder::create fails on an existing path, so the directory is new and owned by us.
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -201,26 +269,27 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         back.iter().all(|e| e["isDeleted"] != Value::Bool(true)),
     );
 
-    let moved_id = report["moved"]["id"].as_str().unwrap_or_default();
-    let text_id = report["moved"]["text_id"].as_str().unwrap_or_default();
-    let moved_before = element(&before, moved_id)?;
+    check(
+        "read-back labels match the fixture",
+        fixture_labels_match(&board, &back),
+    );
+    let moved_id = format!("node:{MOVE_NODE}");
+    let text_id = format!("text:{MOVE_NODE}");
+    let moved_before = element(&before, &moved_id)?;
     let expected = (
         moved_before["x"].as_f64().unwrap_or_default() + MOVE_X,
         moved_before["y"].as_f64().unwrap_or_default() + MOVE_Y,
     );
-    let moved = element(&back, moved_id)?;
+    let moved = element(&back, &moved_id)?;
     check(
         "moved node read back",
         close(moved["x"].as_f64(), Some(expected.0))
             && close(moved["y"].as_f64(), Some(expected.1)),
     );
-    check(
-        "moved text belongs to moved node",
-        moved_before["type"] == "rectangle" && element(&before, text_id)?["containerId"] == moved_id,
-    );
 
     let mut arrows_kept = true;
     let mut ends_followed = true;
+    let mut moved_ends = [false; 2];
     let mut groups_kept = true;
     let mut others_kept = true;
     let mut texts_kept = true;
@@ -228,7 +297,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
     for (old, new) in before.iter().zip(back.iter()) {
         let id = old["id"].as_str().unwrap_or_default();
         let shift = |bound: &Value| {
-            if bound["elementId"].as_str() == Some(moved_id) {
+            if bound["elementId"].as_str() == Some(moved_id.as_str()) {
                 (MOVE_X, MOVE_Y)
             } else {
                 (0.0, 0.0)
@@ -238,6 +307,8 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             arrows_kept &= old["startBinding"] == new["startBinding"]
                 && old["endBinding"] == new["endBinding"];
             let (start_shift, end_shift) = (shift(&old["startBinding"]), shift(&old["endBinding"]));
+            moved_ends[0] |= start_shift != (0.0, 0.0);
+            moved_ends[1] |= end_shift != (0.0, 0.0);
             ends_followed &= match (ends(old), ends(new)) {
                 (Some((os, oe)), Some((ns, ne))) => {
                     close(Some(ns.0), Some(os.0 + start_shift.0))
@@ -259,9 +330,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
                 && close(new["height"].as_f64(), old["height"].as_f64());
         }
         if old["type"] == "text" {
-            texts_kept &= old["text"] == new["text"]
-                && old["originalText"] == new["originalText"]
-                && old["fontSize"] == new["fontSize"];
+            texts_kept &= old["fontSize"] == new["fontSize"];
             text_bindings_kept &= old["containerId"] == new["containerId"];
         } else {
             text_bindings_kept &= old["boundElements"] == new["boundElements"];
@@ -269,8 +338,11 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         groups_kept &= old["groupIds"] == new["groupIds"];
     }
     check("arrow bindings kept", arrows_kept);
-    check("arrow ends followed the node", ends_followed);
-    check("text content kept", texts_kept);
+    check(
+        "incoming and outgoing arrow ends followed Store",
+        ends_followed && moved_ends == [true; 2],
+    );
+    check("text font size kept", texts_kept);
     check("text bindings kept", text_bindings_kept);
     check("group ids kept", groups_kept);
     check("nodes and texts at expected positions", others_kept);
@@ -304,5 +376,19 @@ fn close(a: Option<f64>, b: Option<f64>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) => (a - b).abs() < TOLERANCE,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_rejects_an_omitted_edge_label_and_binding() {
+        let fixture = sample();
+        let mut incomplete = fixture.clone();
+        assert_eq!(incomplete.edges[2].label.take().as_deref(), Some("ready"));
+        let elements = incomplete.elements().unwrap();
+        assert!(!fixture_labels_match(&fixture, &elements));
     }
 }

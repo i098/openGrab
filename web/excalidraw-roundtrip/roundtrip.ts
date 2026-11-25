@@ -22,6 +22,7 @@ type El = {
   boundElements?: { id: string; type: string }[] | null;
   containerId?: string | null;
   text?: string;
+  originalText?: string;
   startBinding?: { elementId: string } | null;
   endBinding?: { elementId: string } | null;
   points?: number[][] | null;
@@ -154,6 +155,13 @@ check(
   "restore returned a deleted element or a blank label",
 );
 check(
+  "labelContent",
+  restored.every((el, i) =>
+    el.type !== "text" || (el.text === raw[i]?.text && el.originalText === raw[i]?.originalText)
+  ),
+  "restore changed a label from the seed",
+);
+check(
   "shapes",
   restored.every((el) =>
     ["rectangle", "arrow", "text"].includes(el.type) &&
@@ -244,7 +252,8 @@ if (reasons.length === 0) {
     exportPadding: 40,
     skipInliningFonts: true,
   });
-  const expectedLines = texts.flatMap((el) => el.text!.replace(/\r\n?/g, "\n").split("\n"))
+  const expectedLines = raw.filter((el) => el.type === "text")
+    .flatMap((el) => el.text!.replace(/\r\n?/g, "\n").split("\n"))
     .filter((line) => line.trim()).sort();
   const labelLines = Array.from(svg.querySelectorAll("text")).filter((el) => el.textContent?.trim());
   labelLines.forEach((el, i) => {
@@ -277,7 +286,6 @@ const report = {
   ok: Object.values(checks).every(Boolean),
   checks,
   reasons,
-  moved: { id: node?.id, text_id: text?.id },
   counts: {
     elements: restored.length,
     nodes: rects.length,

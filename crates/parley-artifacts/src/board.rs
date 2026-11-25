@@ -324,7 +324,11 @@ impl Board {
             arrow.insert("endArrowhead".into(), json!("arrow"));
             arrow.insert("elbowed".into(), json!(false));
             let mut arrow_bound = Vec::new();
-            if let Some(label) = edge.label.as_deref().filter(|label| !label.trim().is_empty()) {
+            if let Some(label) = edge
+                .label
+                .as_deref()
+                .filter(|label| !label.trim().is_empty())
+            {
                 arrow_bound.push(json!({"type": "text", "id": format!("edge-text:{i}")}));
                 out.push(bound_text(
                     &format!("edge-text:{i}"),
@@ -372,7 +376,10 @@ impl Board {
                 return Err(Error::Invalid(format!("duplicate node id {:?}", node.id)));
             }
             if node.label.trim().is_empty() {
-                return Err(Error::Invalid(format!("node {:?} has a blank label", node.id)));
+                return Err(Error::Invalid(format!(
+                    "node {:?} has a blank label",
+                    node.id
+                )));
             }
         }
         for edge in &self.edges {
@@ -395,7 +402,10 @@ impl Board {
                 return Err(Error::Invalid(format!("duplicate group id {:?}", group.id)));
             }
             if group.label.trim().is_empty() {
-                return Err(Error::Invalid(format!("group {:?} has a blank label", group.id)));
+                return Err(Error::Invalid(format!(
+                    "group {:?} has a blank label",
+                    group.id
+                )));
             }
             if group.members.is_empty() {
                 return Err(Error::Invalid(format!(
@@ -818,13 +828,8 @@ mod tests {
             let element = elements.iter().find(|e| e["id"] == id).unwrap();
             assert_eq!(element["groupIds"], json!(["group:input"]));
         }
-        assert!(!elements
-            .iter()
-            .find(|e| e["id"] == "node:b")
-            .unwrap()["groupIds"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("group:input")));
+        let other = elements.iter().find(|e| e["id"] == "node:b").unwrap();
+        assert_eq!(other["groupIds"], json!([]));
         board.groups[0].members.clear();
         assert!(board.layout().is_err());
     }
@@ -924,12 +929,13 @@ mod tests {
         );
         assert_eq!(find("node:a")["groupIds"], json!(["group:input"]));
         assert_eq!(find("text:a")["containerId"], json!("node:a"));
-        let text_ids: Vec<_> = elements
-            .iter()
-            .filter(|e| e["type"] == json!("text"))
-            .map(|e| e["id"].clone())
-            .collect();
-        assert!(text_ids.contains(&json!("edge-text:2")));
+        let label = find("edge-text:2");
+        assert_eq!(label["text"], "done");
+        assert_eq!(label["containerId"], "edge:2");
+        assert_eq!(
+            arrow["boundElements"],
+            json!([{"id": "edge-text:2", "type": "text"}])
+        );
     }
 
     #[test]
