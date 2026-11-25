@@ -934,6 +934,8 @@ mod tests {
             events: mpsc::unbounded_channel().1,
             tasks: Vec::new(),
             owned_target: None,
+            script: None,
+            polled: Default::default(),
         };
         (session, browser)
     }
