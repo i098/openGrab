@@ -57,7 +57,7 @@ The host plays a recorded WAV into the call: attach mode has no fake microphone,
 espeak-ng -w /tmp/say.raw.wav "The launch is on the first of March. Tom will send the budget deck by Friday."
 ffmpeg -y -i /tmp/say.raw.wav -ar 16000 -ac 1 -c:a pcm_s16le /tmp/say.wav
 cargo build --release -p parley-bot
-target/release/live_check 'https://meet.google.com/abc-defg-hij' --attach 9523 --host-authuser 0 --bot-authuser 1 --say /tmp/say.wav
+target/release/live_check 'https://meet.google.com/abc-defg-hij' --attach 9523 --host-authuser 0 --bot-authuser 1 --say /tmp/say.wav --keyword march
 ```
 
 ## Test

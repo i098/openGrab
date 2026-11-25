@@ -47,6 +47,13 @@ struct Args {
     /// Seconds to wait for each answer (a local model can be slow).
     #[arg(long, default_value_t = 850)]
     answer_timeout: u64,
+    /// A word that is in the `--say` audio, and in the right answer to `--question`. The transcript and answer checks need it.
+    #[arg(long, default_value = "march")]
+    keyword: String,
+}
+
+fn mentions(text: &str, word: &str) -> bool {
+    text.to_lowercase().contains(&word.to_lowercase())
 }
 
 fn verdict(ok: bool, check: &str, msg: impl std::fmt::Display) -> bool {
@@ -263,7 +270,7 @@ async fn main() -> Result<()> {
     };
     println!("host plays {secs:.1} s of speech into the call");
     let heard = poll(a.transcript_timeout + secs as u64, || async {
-        !page.text("#lines li").await.is_empty()
+        mentions(&page.text("#lines li").await, &a.keyword)
     })
     .await;
     let lines = page.text("#lines li").await;
@@ -283,7 +290,9 @@ async fn main() -> Result<()> {
     })
     .await;
     ok &= verdict(
-        answer.is_some(),
+        answer
+            .as_deref()
+            .is_some_and(|t| t != parley_brain::REQUEST_FAILED && mentions(t, &a.keyword)),
         "answer",
         format!("chat answer: {}", answer.as_deref().unwrap_or("none")),
     );
@@ -297,7 +306,11 @@ async fn main() -> Result<()> {
     .await;
     let doc = page.text("#doc").await;
     ok &= verdict(
-        reply.is_some() && !doc.trim().is_empty() && doc != before,
+        reply
+            .as_deref()
+            .is_some_and(|t| t != parley_brain::REQUEST_FAILED)
+            && !doc.trim().is_empty()
+            && doc != before,
         "doc",
         format!(
             "chat line: {}; live doc in the open tab: {}",

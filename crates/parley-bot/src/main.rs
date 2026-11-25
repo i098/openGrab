@@ -181,7 +181,7 @@ async fn handle_request(ctx: Arc<Ctx>, text: String) {
                 "request failed: {}",
                 other.err().unwrap_or("empty reply".into())
             );
-            "I could not answer that.".into()
+            parley_brain::REQUEST_FAILED.into()
         }
     };
     let _ = ctx.out.send(line);

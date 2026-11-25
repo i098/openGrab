@@ -22,6 +22,8 @@ pub const MAX_ANSWER_CHARS: usize = 500;
 
 /// The bot name when none is configured.
 pub const DEFAULT_NAME: &str = "Parley";
+/// The chat line the bot posts when it has no answer to a request.
+pub const REQUEST_FAILED: &str = "I could not answer that.";
 
 /// One utterance. This crate's own type: it does not depend on the STT crate.
 #[derive(Debug, Clone, PartialEq)]
