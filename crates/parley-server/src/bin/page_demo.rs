@@ -1,10 +1,12 @@
 //! `page_demo <transcript-file>`: serve the meeting page and feed one line about every 2 seconds.
 //! File lines look like `Speaker: text`; a line with no speaker gets the name "Speaker".
 //! Each line typed on stdin is appended to the live doc as a paragraph (the server-side edit).
+//! A stdin line `board A,B,C` instead sets the whiteboard to a chain of boxes A to B to C.
 //! Set `PAGE_DEMO_ADDR` (default 127.0.0.1:8080) and `PAGE_DEMO_BASE` (default http://<addr>).
 
 use std::time::Duration;
 
+use parley_artifacts::board::{Board, Edge, Node};
 use parley_server::{Line, Meeting, app, new_secret, now_ms};
 
 #[tokio::main]
@@ -24,7 +26,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use tokio::io::AsyncBufReadExt;
         let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
         while let Ok(Some(l)) = lines.next_line().await {
-            doc_meeting.append_paragraph(&l);
+            match l.strip_prefix("board ") {
+                Some(chain) => {
+                    let names: Vec<&str> = chain.split(',').map(str::trim).collect();
+                    let board = Board {
+                        nodes: names
+                            .iter()
+                            .map(|n| Node {
+                                id: n.to_string(),
+                                label: n.to_string(),
+                            })
+                            .collect(),
+                        edges: names
+                            .windows(2)
+                            .map(|w| Edge {
+                                from: w[0].into(),
+                                to: w[1].into(),
+                                label: None,
+                            })
+                            .collect(),
+                        groups: vec![],
+                    };
+                    if let Err(e) = doc_meeting.set_board(&board) {
+                        eprintln!("board: {e}");
+                    }
+                }
+                None => doc_meeting.append_paragraph(&l),
+            }
         }
     });
     let listener = tokio::net::TcpListener::bind(&addr).await?;

@@ -682,6 +682,12 @@ impl BoardDoc {
         Ok(board)
     }
 
+    pub fn apply_update(&self, update: &[u8]) -> Result<(), Error> {
+        let update = Update::decode_v1(update)?;
+        self.doc.transact_mut().apply_update(update)?;
+        Ok(())
+    }
+
     pub fn encode_update(&self) -> Vec<u8> {
         self.doc
             .transact()

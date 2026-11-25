@@ -189,3 +189,109 @@ async fn removed_meeting_closes_doc_sockets_and_refuses_new_ones() {
     assert!(tokio_tungstenite::connect_async(&url).await.is_err());
     assert!(!m.doc_json().to_string().contains("secret words"));
 }
+
+fn board(labels: &[&str]) -> parley_artifacts::board::Board {
+    use parley_artifacts::board::{Board, Edge, Node};
+    Board {
+        nodes: labels
+            .iter()
+            .map(|l| Node {
+                id: l.to_lowercase(),
+                label: (*l).into(),
+            })
+            .collect(),
+        edges: labels
+            .windows(2)
+            .map(|w| Edge {
+                from: w[0].to_lowercase(),
+                to: w[1].to_lowercase(),
+                label: None,
+            })
+            .collect(),
+        groups: vec![],
+    }
+}
+
+/// Element ids in order. Whole values differ in how Yjs stores a whole number (int or float).
+fn ids(elements: &[serde_json::Value]) -> Vec<String> {
+    elements.iter().map(|e| e["id"].to_string()).collect()
+}
+
+#[tokio::test]
+async fn board_converges_for_two_clients_and_a_server_edit() {
+    use futures_util::SinkExt;
+    use parley_artifacts::board::BoardDoc;
+    let m = Meeting::new(new_secret());
+    let sec = m.secret().to_string();
+    let (addr, _tx) = serve(m.clone()).await;
+    let url = format!("ws://{addr}/m/{sec}/board/ws");
+    assert!(
+        tokio_tungstenite::connect_async(format!("ws://{addr}/m/wrong/board/ws"))
+            .await
+            .is_err()
+    );
+    m.set_board(&board(&["Api", "Store"])).unwrap();
+    let (mut a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let local_a = BoardDoc::new();
+    let local_b = BoardDoc::new();
+    for (ws, local) in [(&mut a, &local_a), (&mut b, &local_b)] {
+        let Message::Binary(s) = ws.next().await.unwrap().unwrap() else {
+            panic!("binary")
+        };
+        local.apply_update(&s).unwrap();
+    }
+    assert_eq!(ids(&local_a.elements().unwrap()), ids(&m.board_elements()));
+    let before = m.board_elements();
+    assert!(!before.is_empty());
+
+    // Client A adds a shape; client B receives it.
+    let mut drawn = local_a.elements().unwrap();
+    drawn.push(serde_json::json!({"type": "rectangle", "id": "drawn", "x": 1, "y": 2}));
+    local_a.set_elements(&drawn);
+    a.send(Message::binary(local_a.encode_update()))
+        .await
+        .unwrap();
+    let Message::Binary(u) = b.next().await.unwrap().unwrap() else {
+        panic!("binary")
+    };
+    local_b.apply_update(&u).unwrap();
+    assert_eq!(ids(&local_b.elements().unwrap()), ids(&drawn));
+    assert_eq!(ids(&m.board_elements()), ids(&drawn));
+
+    // Server edit reaches both.
+    m.set_board(&board(&["Api", "Queue", "Store"])).unwrap();
+    for (ws, local) in [(&mut a, &local_a), (&mut b, &local_b)] {
+        let Message::Binary(u) = ws.next().await.unwrap().unwrap() else {
+            panic!("binary")
+        };
+        local.apply_update(&u).unwrap();
+    }
+    let want = m.board_elements();
+    assert_ne!(ids(&want), ids(&drawn));
+    assert_eq!(ids(&local_a.elements().unwrap()), ids(&want));
+    assert_eq!(ids(&local_b.elements().unwrap()), ids(&want));
+    assert!(want.iter().any(|e| e["id"] == "text:queue"));
+}
+
+#[tokio::test]
+async fn removed_meeting_closes_board_sockets_and_clears_the_board() {
+    let m = Meeting::new(new_secret());
+    let sec = m.secret().to_string();
+    let (addr, _tx) = serve(m.clone()).await;
+    let url = format!("ws://{addr}/m/{sec}/board/ws");
+    let (mut a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    a.next().await.unwrap().unwrap();
+    m.set_board(&board(&["Api"])).unwrap();
+    a.next().await.unwrap().unwrap();
+    assert!(!m.board_elements().is_empty());
+
+    m.remove();
+
+    assert!(matches!(
+        a.next().await,
+        Some(Ok(Message::Close(_))) | Some(Err(_)) | None
+    ));
+    assert!(tokio_tungstenite::connect_async(&url).await.is_err());
+    assert!(m.board_elements().is_empty());
+}
