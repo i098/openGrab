@@ -348,15 +348,15 @@ impl Board {
                 .as_deref()
                 .filter(|label| !label.trim().is_empty())
             {
-                let (mx, my) = label_anchor(&route);
-                let mask = label_width(label);
-                let height = 20.0 * label_lines(label);
+                let (mx, my, vertical) = label_anchor(&route);
+                let (mask, height) = label_size(label, vertical);
                 arrow_bound.push(json!({"type": "text", "id": format!("edge-text:{i}")}));
+                let (tx, ty) = (mx - mask / 2.0, my - height / 2.0);
                 let mut text = bound_text(
                     &format!("edge-text:{i}"),
                     label,
-                    mx - mask / 2.0,
-                    my - height,
+                    tx,
+                    ty,
                     mask,
                     height,
                     16,
@@ -523,24 +523,25 @@ fn crosses(a: (f64, f64), b: (f64, f64), n: &Placed) -> bool {
     t0 <= t1
 }
 
-/// Width of the label mask in pixels at font size 16: about 10 px a character, plus padding, capped so a long label wraps instead of hiding the shaft.
-fn label_width(label: &str) -> f64 {
-    (label.chars().count() as f64 * 10.0 + 16.0).min(MAX_LABEL_WIDTH)
+/// Size of the label mask at font size 16: about 10 px a character, plus padding.
+/// Excalidraw centres it on the arrow, so it wraps at 100 px on a horizontal shaft
+/// and at 400 px on a vertical one, where the height is what hides the shaft.
+fn label_size(label: &str, vertical: bool) -> (f64, f64) {
+    let max_width = if vertical { 400.0 } else { MAX_LABEL_WIDTH };
+    let natural = label.chars().count() as f64 * 10.0 + 16.0;
+    (natural.min(max_width), 20.0 * (natural / max_width).ceil())
 }
 
-/// Lines a label needs at the capped mask width.
-fn label_lines(label: &str) -> f64 {
-    ((label.chars().count() as f64 * 10.0 + 16.0) / MAX_LABEL_WIDTH).ceil()
-}
-
-/// Middle of the longest segment, where the label mask hides the least of the shaft.
-fn label_anchor(route: &[(f64, f64)]) -> (f64, f64) {
-    let len = |w: &[(f64, f64)]| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1);
-    let w = route
-        .windows(2)
-        .max_by(|a, b| len(a).total_cmp(&len(b)))
-        .expect("a route has two points");
-    ((w[0].0 + w[1].0) / 2.0, (w[0].1 + w[1].1) / 2.0)
+/// Where Excalidraw centres an arrow label: the midpoint of the middle segment of an even-length route.
+/// Also whether that segment is vertical.
+fn label_anchor(route: &[(f64, f64)]) -> (f64, f64, bool) {
+    let i = route.len() / 2 - 1;
+    let (a, b) = (route[i], route[i + 1]);
+    (
+        (a.0 + b.0) / 2.0,
+        (a.1 + b.1) / 2.0,
+        (a.0 - b.0).abs() < 1.0,
+    )
 }
 
 fn arrow_ends(from: &Placed, to: &Placed) -> (f64, f64, f64, f64) {
@@ -1151,46 +1152,81 @@ mod tests {
 
     #[test]
     fn a_label_leaves_the_arrow_shaft_visible() {
-        let labels = [
-            "ready",
-            "ok",
-            "a very long label that would hide the whole arrow shaft",
-        ];
-        let elements = chain(
+        let long = "a very long label that would hide the whole arrow shaft";
+        let row = chain(
             &[
-                ("a", "b", Some(labels[0])),
-                ("b", "c", Some(labels[1])),
-                ("a", "c", Some(labels[2])),
+                ("a", "b", Some("ready")),
+                ("b", "c", Some(long)),
+                ("a", "c", Some("skip")),
             ],
             &["a", "b", "c"],
         );
-        for (i, label) in labels.iter().enumerate() {
-            let arrow = elements
+        let column = Board {
+            nodes: ["x", "y", "z"]
                 .iter()
-                .find(|e| e["id"] == format!("edge:{i}"))
-                .unwrap();
-            let text = elements
-                .iter()
-                .find(|e| e["id"] == format!("edge-text:{i}"))
-                .unwrap();
-            assert_eq!(text["text"], *label);
-            let mask_w = text["width"].as_f64().unwrap();
-            let mask_h = text["height"].as_f64().unwrap();
-            let longest = abs_points(arrow)
-                .windows(2)
-                .map(|w| (w[1].0 - w[0].0, w[1].1 - w[0].1))
-                .max_by(|a, b| a.0.hypot(a.1).total_cmp(&b.0.hypot(b.1)))
-                .unwrap();
-            let (shaft, mask) = if longest.0.abs() >= longest.1.abs() {
-                (longest.0.abs(), mask_w)
-            } else {
-                (longest.1.abs(), mask_h)
-            };
-            // The label mask sits on the middle of the longest segment. Leave room for a 40 px move.
-            assert!(
-                shaft >= mask + 2.0 * 24.0 + 40.0,
-                "edge {i} shaft {shaft} mask {mask}"
-            );
+                .map(|id| Node {
+                    id: (*id).into(),
+                    label: (*id).into(),
+                })
+                .collect(),
+            edges: vec![
+                Edge {
+                    from: "x".into(),
+                    to: "y".into(),
+                    label: Some("ok".into()),
+                },
+                Edge {
+                    from: "y".into(),
+                    to: "z".into(),
+                    label: Some(long.into()),
+                },
+            ],
+            groups: vec![Group {
+                id: "g".into(),
+                label: "G".into(),
+                members: vec!["x".into(), "y".into(), "z".into()],
+            }],
+        }
+        .elements()
+        .unwrap();
+        for (elements, edges) in [(&row, 3), (&column, 2)] {
+            for i in 0..edges {
+                let arrow = elements
+                    .iter()
+                    .find(|e| e["id"] == format!("edge:{i}"))
+                    .unwrap();
+                let text = rect(elements, &format!("edge-text:{i}"));
+                let (x0, x1) = (text.x, text.x + text.width);
+                let (y0, y1) = (text.y, text.y + text.height);
+                // Excalidraw ignores the stored position of an arrow label and centres it on the
+                // midpoint of the arrow's middle segment. The mask then hides its own extent along that segment.
+                let points = abs_points(arrow);
+                let (a, b) = (points[points.len() / 2 - 1], points[points.len() / 2]);
+                let extent = if (a.0 - b.0).abs() < 1.0 {
+                    text.height
+                } else {
+                    text.width
+                };
+                let shaft = (a.0 - b.0).hypot(a.1 - b.1);
+                assert!(
+                    shaft - extent >= 24.0,
+                    "edge {i}: mask {extent} hides shaft {shaft}"
+                );
+                let centre = (text.x + text.width / 2.0, text.y + text.height / 2.0);
+                assert_eq!(centre, ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0));
+                for n in elements
+                    .iter()
+                    .filter(|e| e["id"].as_str().is_some_and(|id| id.starts_with("node:")))
+                {
+                    let (nx, ny) = (n["x"].as_f64().unwrap(), n["y"].as_f64().unwrap());
+                    let (nw, nh) = (n["width"].as_f64().unwrap(), n["height"].as_f64().unwrap());
+                    assert!(
+                        x0 >= nx + nw || x1 <= nx || y0 >= ny + nh || y1 <= ny,
+                        "edge {i} label covers {}",
+                        n["id"]
+                    );
+                }
+            }
         }
     }
 }
