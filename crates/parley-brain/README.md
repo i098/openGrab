@@ -30,3 +30,14 @@ ANTHROPIC_MODEL=... ANTHROPIC_API_KEY=... cargo run -p parley-brain --bin notes_
 OPENAI_MODEL=gpt-x OPENAI_API_KEY=... cargo run -p parley-brain --bin ask_say -- --adapter openai meeting.txt "Parley, what did Tom agree to?"
 ANTHROPIC_MODEL=... ANTHROPIC_API_KEY=... cargo run -p parley-brain --bin ask_say -- --adapter anthropic meeting.txt "hey parley what is next"
 ```
+
+## Write a doc
+
+`Transcript::write_doc(llm, request, &artifact)` runs the model with two tools: `doc_create` (title, becomes a level-1 heading; only on an empty doc) and `doc_append` (one block: `paragraph` with `text`, `heading` with `level` 1-6 and `text`, or `bullets` with `items`). The model sees the current doc, so it can extend a doc across turns: on a doc with content `doc_append` is valid first and `doc_create` is refused. It applies the calls in order to the `parley_artifacts::Artifact` and returns the chat line to post (at most 500 characters). The caller posts the "Listening" state and the doc link.
+A malformed call (unknown tool, `doc_append` first on an empty doc, `doc_create` on a doc with content or a second `doc_create`, bad level, empty text) or no call is an error, and the artifact is unchanged: every call is checked before the first is applied.
+
+`doc_say` prints the chat line and the document JSON, with the same env variables as `ask_say`:
+
+```sh
+cargo run -p parley-brain --bin doc_say -- --adapter anthropic empty.txt "Parley, start a doc for the launch plan"
+```

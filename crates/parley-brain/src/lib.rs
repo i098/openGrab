@@ -7,6 +7,9 @@ use serde::Deserialize;
 use serde_json::json;
 use std::fmt::Write;
 
+mod doc;
+pub use doc::{DOC_APPEND, DOC_CREATE};
+
 const TOOL_NAME: &str = "write_notes";
 const SYSTEM: &str = "You take notes for a meeting. Read the transcript, then call the write_notes tool once. Give a short summary. Add one action item for each task that a person agreed to do or was asked to do, with that person as the owner.";
 
@@ -47,6 +50,8 @@ pub enum BrainError {
     NoToolCall,
     #[error("the {TOOL_NAME} arguments do not match the notes shape: {0}")]
     BadNotes(#[from] serde_json::Error),
+    #[error("rejected doc tool call: {0}")]
+    BadDocCall(String),
 }
 
 /// Ordered utterances, kept in start-time order.
