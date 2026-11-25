@@ -4,11 +4,11 @@
   "type": "module",
   "scripts": { "start": "bun run roundtrip.ts" },
   "dependencies": {
-    "@tiptap/core": "^2.11.0",
-    "@tiptap/extension-collaboration": "^2.11.0",
-    "@tiptap/pm": "^2.11.0",
-    "@tiptap/starter-kit": "^2.11.0",
-    "happy-dom": "^15.11.0",
+    "@tiptap/core": "^3.35.0",
+    "@tiptap/extension-collaboration": "^3.35.0",
+    "@tiptap/pm": "^3.35.0",
+    "@tiptap/starter-kit": "^3.35.0",
+    "happy-dom": "^21.0.4",
     "y-prosemirror": "^1.2.12",
     "yjs": "^13.6.0"
   }

@@ -27,7 +27,7 @@ Y.applyUpdate(ydoc, new Uint8Array(await Bun.file(inPath).arrayBuffer()));
 
 const editor = new Editor({
   element: document.createElement("div"),
-  extensions: [StarterKit.configure({ history: false }), Collaboration.configure({ document: ydoc })],
+  extensions: [StarterKit.configure({ undoRedo: false, trailingNode: false }), Collaboration.configure({ document: ydoc })],
 });
 
 const before = editor.getJSON();
