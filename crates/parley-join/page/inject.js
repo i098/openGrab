@@ -203,6 +203,7 @@ registerProcessor("parley-pcm",P)`;
 
   // ---- chat ---------------------------------------------------------------
   const chatSeen = new Set();
+  const sentLines = new Set();
   let chatPrimed = false;
   const textOf = (n) => norm(n && n.textContent);
   const senderOf = (node) => {
@@ -225,8 +226,9 @@ registerProcessor("parley-pcm",P)`;
     return [];
   };
   const chatPanelOpen = () => {
+    // Meet (Chrome 159 era) sets no aria-pressed on the toggle, so the visible message list is the signal.
     const t = q1(S.chatToggle);
-    return t ? t.getAttribute("aria-pressed") === "true" : !!q1(S.chatContainer);
+    return (!!t && t.getAttribute("aria-pressed") === "true") || shown(q1(S.chatContainer));
   };
   const scanChat = () => {
     const self = CFG.attached ? q1(S.selfMarker) : null;
@@ -241,7 +243,8 @@ registerProcessor("parley-pcm",P)`;
       if (chatSeen.has(id)) continue;
       chatSeen.add(id);
       if (!chatPrimed) continue; // what is on screen when the panel first opens is older than the bot
-      if (!sender || sender === ownName || sender.toLowerCase() === "you") continue;
+      // The host and the bot can be one person with one display name, so the own name only counts for lines the driver posted.
+      if (!sender || sender.toLowerCase() === "you" || (sender === ownName && sentLines.has(text))) continue;
       sendJson({ t: "chat", id, sender, text });
     }
   };
@@ -275,6 +278,20 @@ registerProcessor("parley-pcm",P)`;
     [...document.querySelectorAll("button")].find(
       (b) => shown(b) && !b.disabled && b.getAttribute("aria-disabled") !== "true" && S.joinButtonText.includes(norm(b.textContent).toLowerCase()),
     );
+  // "Admit" is a button for a normal guest and the menu item "Admit entry" for a guest flagged as a risk.
+  const admitButton = () =>
+    [...document.querySelectorAll("button, [role=menuitem], li")].find(
+      (b) => shown(b) && !b.disabled && S.admitButtonText.some((t) => norm(b.textContent).toLowerCase().endsWith(t)),
+    );
+  const admitMore = () => {
+    const deny = q1(S.admitDenyButton);
+    const row = deny && deny.parentElement && deny.parentElement.parentElement && deny.parentElement.parentElement.parentElement;
+    return row && q1(S.admitMoreButton, row);
+  };
+  // The host sees "N guest waiting" as a button that opens the popover with "Admit".
+  let lastBadge = 0;
+  const admitBadge = () =>
+    [...document.querySelectorAll("[role=button]")].find((b) => shown(b) && S.admitBadgeText.some((t) => norm(b.textContent).toLowerCase().includes(t)));
   const centre = (el) => {
     if (!shown(el)) return null;
     el.scrollIntoView({ block: "center", inline: "center" });
@@ -315,6 +332,8 @@ registerProcessor("parley-pcm",P)`;
       const el = {
         name: () => q1(S.nameInput),
         join: joinButton,
+        // The badge toggles a popover: click it at most every 5 s so a click cannot close the popover it opened.
+        admit: () => admitButton() || (Date.now() - lastBadge > 5000 && (lastBadge = Date.now(), admitMore() || admitBadge())),
         mic: () => q1(S.micButton),
         cam: () => q1(S.camButton),
         leave: () => q1(S.leaveButton),
@@ -325,7 +344,10 @@ registerProcessor("parley-pcm",P)`;
       return centre(el);
     },
     media: () => ({ mic: muteState(q1(S.micButton)), cam: muteState(q1(S.camButton)) }),
+    // Text messages the page could not send over the WebSocket; the driver polls them in attach mode.
+    takeQueue: () => queue.splice(0).filter((m) => typeof m === "string"),
     chatOpen: chatPanelOpen,
+    noteSent: (text) => sentLines.add(norm(text)),
     chatCount: (text) => chatLines().filter((l) => l === norm(text)).length,
     setTile: (s) => {
       tileState = s;

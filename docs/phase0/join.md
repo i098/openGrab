@@ -10,9 +10,10 @@ No account name, e-mail address or cookie appears here.
 | Join kind | Verdict | Why |
 | --- | --- | --- |
 | Guest (no Google account) | **No-go, as tested** | Meet refused every guest with "You can't join this video call". The host was in the call each time and no knock reached the host. |
-| Signed-in bot | **NOT RUN** | The section 6.1 checks did not run with a signed-in account on that date. See F5 for the earlier cookie-copy attempt. |
+| Signed-in bot | **Join, Chat, Tile, Outsider pass; speakers not run** | Run on 2026-11-25 in attach mode, see F6. The speaker check is a stated gap, see F7. |
 
-Section 6.1 checks that ran: Join (guest) failed. Chat, Tile, Outsider and speakers-in-call did not run, because no run got into a call.
+Section 6.1 checks that ran as a guest (2026-11-13): Join failed. Chat, Tile, Outsider and speakers-in-call did not run, because no run got into a call.
+Section 6.1 checks that ran with signed-in accounts (2026-11-25): Join, Chat, Tile and Outsider pass. Speakers-in-call did not run (F7).
 One part of Phase 0 is proven: Chromium profiles can play a known recording as a microphone (F3).
 
 ## Current usage
@@ -94,3 +95,37 @@ Measured on 2026-11-13:
 
 The source browser later showed every account as signed out. These observations do not establish
 when or why its sessions ended. An account list alone does not prove that a session is usable.
+
+## F6. Signed-in run, two accounts in one browser (2026-11-25)
+
+Setup: one shared headed Chromium 159.0.8154.6 with CDP on a local port, two signed-in Google accounts: host account A (one domain) and account C (another domain).
+The run signs in and out of nothing and uses no new profile.
+`p0_exit --attach <port> --host-authuser 0 --bot-authuser 1` opens two new windows in that browser and closes both at the end.
+The host window (`?authuser=0`) joins the call as the meeting owner and admits the bot.
+The bot window (`?authuser=1`, the other domain) is the participant under test.
+
+| Check | Result |
+| --- | --- |
+| Join | PASS. The bot knocked, the host admitted it, and the bot reached the call. |
+| Chat | PASS. The host posted 10 lines and the bot read 10. The bot posted 10 replies and the host read 10. |
+| Tile | PASS. Both tile states were set and drawn. A person must still look at the call. |
+| Outsider | PASS in 3 runs in 3 calls. The host view lists the other-domain participant with its id, display name and avatar URL. Meet gives no e-mail address or domain in the tile. |
+
+Findings that the run needed code changes for:
+
+- Meet no longer sets `aria-pressed` on the chat toggle. The driver now treats a visible message list as an open panel. Before this, the driver toggled the panel shut on every post.
+- Chrome refuses the page's WebSocket to the driver in this attached browser (the page gets an error and no CSP report). In attach mode the driver now takes the page's queued text messages with `Runtime.evaluate`. Audio frames need the WebSocket and do not arrive in attach mode.
+- A Meet page with `?authuser=N` never committed when the page script ran at document start (the tab stayed on `about:blank`). For such links the driver now injects the script after the page loads.
+- The host and the bot can have the same display name, so the page script no longer skips a message only because the sender name equals its own name. It skips the lines the driver posted itself and Meet's "You".
+- The host of a guest flagged "With potential risks" sees only "Deny" and a "More actions" menu. The menu item "Admit entry" admits the guest. For a normal guest the host sees the "N guest waiting" button, then an "Admit" button.
+- The driver opens each attached tab in a new window. A background tab in the same window is hidden, and Meet shows no waiting-guest controls to a hidden host tab.
+- Meet does not mark the viewer's own tile. In the host view the Outsider check counts every tile and subtracts the host.
+
+## F7. Speakers-in-call: gap
+
+The speaker check (three guests with `--use-file-for-fake-audio-capture`, F3) did not run with signed-in accounts.
+It needs three more Chromium processes with their own `--user-data-dir`, because the fake-audio flag is a launch flag and cannot change in the shared browser.
+A new profile has no Google session, and these profiles would be guests, which Meet refuses (F1). Signing a new profile in is not allowed on this host.
+Also, audio frames do not reach the driver in attach mode (F6), so the recorded audio part of the check cannot run there either.
+Not tested: whether Meet lights one speaking indicator per fake-audio participant. The method that works for the audio itself is F3.
+To close this gap, run the speaker check where a signed-in profile for each speaker can be made, or find a way to read the speaking indicator without a new profile.

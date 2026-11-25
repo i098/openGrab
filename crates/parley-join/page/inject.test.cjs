@@ -89,6 +89,8 @@ test('attached chat reads the host even when the host shares the tile label', ()
       '[data-self-name]': { getAttribute: () => 'Alex' },
       'button[aria-label="Leave call"]': button(''),
       '[jsname="xySENc"]': {
+        getClientRects: () => [{}],
+        getBoundingClientRect: () => ({ width: 10 }),
         querySelectorAll: (selector) => selector === '[data-message-id]' ? messages : [],
       },
     },
@@ -103,6 +105,7 @@ test('attached chat reads the host even when the host shares the tile label', ()
     getAttribute: (attr) => ({ 'data-sender-name': sender, 'data-message-id': id })[attr],
     querySelector: () => null,
   });
+  page.noteSent('Bot reply');
   scan();
   messages.push(
     message('Sam', '1', 'Host question'),

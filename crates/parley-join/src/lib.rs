@@ -144,6 +144,10 @@ pub struct Session {
     tasks: Vec<JoinHandle<()>>,
     /// The only tab that this session can close in attach mode.
     owned_target: Option<OwnedTab>,
+    /// Page script source and its new-document registration id (attach mode), for `join` with `authuser=`.
+    script: Option<(String, String)>,
+    /// Page messages taken by polling, not yet returned by `next_event`.
+    polled: std::collections::VecDeque<CallEvent>,
 }
 
 impl Session {
@@ -170,7 +174,7 @@ impl Session {
         let task = tokio::spawn(serve(listener, token, tx));
         let abort = task.abort_handle();
         match Self::start(opts, events, vec![task]).await {
-            Ok(session) => {
+            Ok(mut session) => {
                 session.configure(ws_url).await?;
                 Ok(session)
             }
@@ -229,6 +233,8 @@ impl Session {
             events,
             tasks,
             owned_target,
+            script: None,
+            polled: Default::default(),
         })
     }
 
@@ -236,7 +242,7 @@ impl Session {
         matches!(self.opts.browser, Browser::Attach(_))
     }
 
-    async fn configure(&self, ws_url: String) -> Result<()> {
+    async fn configure(&mut self, ws_url: String) -> Result<()> {
         let ua: String = self.eval_raw("navigator.userAgent").await?;
         anyhow::ensure!(!ua.is_empty(), "no navigator.userAgent");
         let v = self.cdp.call(None, "Browser.getVersion", json!({})).await?;
@@ -266,11 +272,16 @@ impl Session {
         } else {
             format!("window.__PARLEY_CFG = {cfg_js};\n{INJECT_JS}")
         };
-        self.cmd(
-            "Page.addScriptToEvaluateOnNewDocument",
-            json!({"source": source}),
-        )
-        .await?;
+        let reply = self
+            .cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({"source": source}),
+            )
+            .await?;
+        if self.attached() {
+            let id = reply["identifier"].as_str().unwrap_or_default().to_owned();
+            self.script = Some((source, id));
+        }
         Ok(())
     }
 
@@ -306,6 +317,20 @@ impl Session {
             check_call_link(url)?;
         }
         let start = Instant::now();
+        // shortcut: a Meet page for a chosen account (`authuser=`) never commits when the script runs at document start
+        // (seen with a managed Workspace account, Chrome 159), so that page gets the script after it loads.
+        let late = if url.contains("authuser=") {
+            self.script.take()
+        } else {
+            None
+        };
+        if let Some((_, id)) = &late {
+            self.cmd(
+                "Page.removeScriptToEvaluateOnNewDocument",
+                json!({"identifier": id}),
+            )
+            .await?;
+        }
         self.navigate(url).await;
         let mut ready = false;
         let mut clicked: Option<Instant> = None;
@@ -313,6 +338,14 @@ impl Session {
         let outcome = loop {
             if start.elapsed() > timeout {
                 break Outcome::Timeout;
+            }
+            if let Some((source, _)) = &late {
+                let _ = self
+                    .eval_raw::<Value>(&format!(
+                        "window.__parley ? 0 : (0, eval)({})",
+                        serde_json::to_string(source)?
+                    ))
+                    .await;
             }
             state = self.state().await;
             if let Some(outcome) = terminal_outcome(&state.phase) {
@@ -384,7 +417,11 @@ impl Session {
     /// A real (trusted) mouse click on a control the page script found.
     pub async fn click(&self, kind: &str) -> Result<()> {
         let p: Option<Pt> = self.eval(&format!("__parley.point('{kind}')")).await?;
-        let p = p.with_context(|| format!("no {kind} control on the page"))?;
+        self.click_at(p.with_context(|| format!("no {kind} control on the page"))?)
+            .await
+    }
+
+    async fn click_at(&self, p: Pt) -> Result<()> {
         for (ty, buttons) in [("mouseMoved", 0), ("mousePressed", 1), ("mouseReleased", 0)] {
             self.cmd(
                 "Input.dispatchMouseEvent",
@@ -393,6 +430,14 @@ impl Session {
             .await?;
         }
         Ok(())
+    }
+
+    /// Host side: click the "Admit" button of a waiting guest, if one shows. True if clicked.
+    pub async fn admit_waiting(&self) -> Result<bool> {
+        let p: Option<Pt> = self.eval("__parley.point('admit')").await?;
+        let Some(p) = p else { return Ok(false) };
+        self.click_at(p).await?;
+        Ok(true)
     }
 
     async fn enter_name(&self) -> Result<()> {
@@ -443,6 +488,8 @@ impl Session {
     pub async fn post_chat(&self, text: &str) -> Result<bool> {
         let js_text = serde_json::to_string(text)?;
         self.open_chat().await?;
+        self.eval::<Value>(&format!("__parley.noteSent({js_text})"))
+            .await?;
         let before: u32 = self.eval(&format!("__parley.chatCount({js_text})")).await?;
         self.click("chatComposer").await?;
         self.insert_text(text).await?;
@@ -516,10 +563,35 @@ impl Session {
 
     /// Next page or audio event, or None after `within`.
     pub async fn next_event(&mut self, within: Duration) -> Option<CallEvent> {
-        tokio::time::timeout(within, self.events.recv())
-            .await
-            .ok()
-            .flatten()
+        if !self.attached() {
+            return tokio::time::timeout(within, self.events.recv())
+                .await
+                .ok()
+                .flatten();
+        }
+        // Chrome can refuse the page's WebSocket to the driver (error, no CSP report), so the page keeps
+        // its text messages queued and the driver takes them with `Runtime.evaluate`. Audio is not polled.
+        let end = Instant::now() + within;
+        loop {
+            if let Some(event) = self.polled.pop_front() {
+                return Some(event);
+            }
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let wait = left.min(Duration::from_millis(500));
+            if let Ok(event) = tokio::time::timeout(wait, self.events.recv()).await {
+                return event;
+            }
+            let queued: Vec<String> = self.eval("__parley.takeQueue()").await.unwrap_or_default();
+            self.polled.extend(
+                queued
+                    .iter()
+                    .filter_map(|m| serde_json::from_str(m).ok())
+                    .map(CallEvent::Page),
+            );
+        }
     }
 
     pub async fn leave(mut self) -> Result<()> {
@@ -589,7 +661,11 @@ impl OwnedTab {
     async fn create(cdp: &Cdp, port: u16) -> Result<Self> {
         let before = page_targets(cdp).await?;
         let reply = match cdp
-            .call(None, "Target.createTarget", json!({"url": "about:blank"}))
+            .call(
+                None,
+                "Target.createTarget",
+                json!({"url": "about:blank", "newWindow": true}),
+            )
             .await
         {
             Ok(reply) => reply,

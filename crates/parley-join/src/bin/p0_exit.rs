@@ -39,6 +39,13 @@ struct Args {
     chat_count: u32,
     #[arg(long, default_value_t = 600)]
     chat_timeout: u64,
+    /// Two-account run (needs --attach): a second tab joins as the host with this Google `authuser` index,
+    /// admits the bot, and posts and reads chat lines with it. The bot is the other account.
+    #[arg(long)]
+    host_authuser: Option<u8>,
+    /// Google `authuser` index for the bot tab (default: the browser's default account).
+    #[arg(long)]
+    bot_authuser: Option<u8>,
     /// Directory with a.wav, b.wav, c.wav (see scripts/make-speakers.sh): enables the speakers check.
     #[arg(long)]
     speakers: Option<PathBuf>,
@@ -174,6 +181,25 @@ fn create_output_dir(out: Option<PathBuf>, attached: bool) -> Result<PathBuf> {
     Ok(out)
 }
 
+fn with_authuser(link: &str, n: Option<u8>) -> String {
+    match n {
+        Some(n) => format!("{link}?authuser={n}"),
+        None => link.to_owned(),
+    }
+}
+
+/// Click "Admit" on the host tab once a second, for as long as it is polled.
+async fn admit_loop(host: Option<&Session>) -> std::convert::Infallible {
+    loop {
+        if let Some(h) = host
+            && h.admit_waiting().await.unwrap_or(false)
+        {
+            eprintln!("host: admitted a waiting guest");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let a = Args::parse();
@@ -195,6 +221,34 @@ async fn main() -> Result<()> {
     let mut chrome = a.chrome.clone();
     let mut results = Vec::new();
     let mut col = Collected::default();
+
+    let bot_link = with_authuser(&a.link, a.bot_authuser);
+    let mut host: Option<Session> = None;
+    let mut hcol = Collected::default();
+    if let Some(n) = a.host_authuser {
+        let port = a.attach.context("--host-authuser needs --attach")?;
+        let mut h = Session::launch(Opts {
+            browser: Browser::Attach(port),
+            name: "Host".into(),
+            role: Role::Bot,
+        })
+        .await?;
+        let r = h
+            .join(
+                &with_authuser(&a.link, Some(n)),
+                Duration::from_secs(a.join_timeout),
+            )
+            .await?;
+        println!(
+            "host (authuser {n}): {:?} after {} ms",
+            r.outcome, r.waited_ms
+        );
+        if r.outcome != Outcome::Admitted {
+            h.leave().await?;
+            bail!("the host tab did not reach the call: {:?}", r.outcome);
+        }
+        host = Some(h);
+    }
 
     // Join: `joins` attempts, each with a fresh temporary profile, or the shared `--profile`; the last one stays.
     let mut admitted = 0u32;
@@ -228,7 +282,10 @@ async fn main() -> Result<()> {
                 a.joins, a.name
             );
         }
-        let r = s.join(&a.link, Duration::from_secs(a.join_timeout)).await?;
+        let r = tokio::select! {
+            r = s.join(&bot_link, Duration::from_secs(a.join_timeout)) => r?,
+            never = admit_loop(host.as_ref()) => match never {},
+        };
         let line = serde_json::json!({"n": i, "at": now_ms(), "report": r});
         joins_log += &format!("{line}\n");
         eprintln!(
@@ -260,6 +317,9 @@ async fn main() -> Result<()> {
     let Some(mut bot) = bot else {
         println!("SKIP every other check: the last join did not reach the call");
         write_summary(&out, &results)?;
+        if let Some(h) = host {
+            h.leave().await?;
+        }
         bail!("not in the call");
     };
     let chat_open = if want("chat") {
@@ -268,7 +328,14 @@ async fn main() -> Result<()> {
         Ok(())
     };
 
+    let host_chat_open = match &host {
+        Some(h) if want("chat") => h.open_chat().await,
+        _ => Ok(()),
+    };
     drain(&mut bot, Duration::from_secs(5), &mut col).await;
+    if let Some(h) = host.as_mut() {
+        drain(h, Duration::from_secs(3), &mut hcol).await;
+    }
     bot.screenshot(&out.join("in-call.png")).await?;
 
     if want("tile") {
@@ -301,14 +368,31 @@ async fn main() -> Result<()> {
     if want("outsider") {
         let mut snaps = Vec::new();
         for _ in 0..3 {
-            snaps.push(serde_json::json!({"at": now_ms(), "participants": bot.roster().await?}));
+            let mut snap = serde_json::json!({"at": now_ms(), "participants": bot.roster().await?});
+            if let Some(h) = host.as_mut() {
+                snap["host_view"] = serde_json::to_value(h.roster().await?)?;
+                drain(h, Duration::from_secs(1), &mut hcol).await;
+            }
+            snaps.push(snap);
             drain(&mut bot, Duration::from_secs(3), &mut col).await;
         }
+        // With a host tab, the outside account is seen by the host; without one, by the bot.
+        let view = if host.is_some() {
+            "host_view"
+        } else {
+            "participants"
+        };
         let others = snaps.last().map_or(0, |s| {
-            s["participants"]
+            s[view]
                 .as_array()
                 .map_or(0, |p| p.iter().filter(|x| x["is_self"] == false).count())
         });
+        // Meet no longer marks the viewer's own tile, so the host view counts the host tile too.
+        let others = if host.is_some() {
+            others.saturating_sub(1)
+        } else {
+            others
+        };
         let file = out.join("participants.json");
         std::fs::write(
             &file,
@@ -350,6 +434,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    let chat_open = chat_open.and(host_chat_open);
     if let Err(e) = &chat_open {
         verdict(
             false,
@@ -358,7 +443,36 @@ async fn main() -> Result<()> {
             &mut results,
         );
     }
-    if want("chat") && chat_open.is_ok() {
+    if let (true, Some(h), Ok(())) = (want("chat"), host.as_mut(), &chat_open) {
+        let (mut bot_read, mut host_read, mut log) = (0u32, 0u32, String::new());
+        for n in 1..=a.chat_count {
+            let line = format!("host line {n}/{}", a.chat_count);
+            let posted = h.post_chat(&line).await.unwrap_or(false);
+            let got = wait_chat(&mut bot, &mut col, &line, a.chat_timeout.min(30)).await;
+            bot_read += u32::from(got);
+            let reply = format!("bot line {n}/{}", a.chat_count);
+            let replied = got && bot.post_chat(&reply).await.unwrap_or(false);
+            let back = replied && wait_chat(h, &mut hcol, &reply, a.chat_timeout.min(30)).await;
+            host_read += u32::from(back);
+            eprintln!(
+                "chat {n}: host_posted={posted} bot_read={got} bot_replied={replied} host_read={back}"
+            );
+            log += &format!(
+                "{}\n",
+                serde_json::json!({"n": n, "host_posted": posted, "bot_read": got, "bot_replied": replied, "host_read": back})
+            );
+        }
+        std::fs::write(out.join("chat.jsonl"), log)?;
+        verdict(
+            bot_read == a.chat_count && host_read == a.chat_count,
+            "chat",
+            format!(
+                "host to bot: {bot_read} of {} lines read; bot to host: {host_read} of {} lines read",
+                a.chat_count, a.chat_count
+            ),
+            &mut results,
+        );
+    } else if want("chat") && chat_open.is_ok() {
         println!(
             "chat: waiting for the host to post {} messages",
             a.chat_count
@@ -398,10 +512,26 @@ async fn main() -> Result<()> {
     write_summary(&out, &results)?;
     bot.screenshot(&out.join("end.png")).await?;
     bot.leave().await?;
+    if let Some(h) = host {
+        h.leave().await?;
+    }
     if results.iter().any(|(_, ok)| !ok) {
         bail!("a check failed");
     }
     Ok(())
+}
+
+/// Wait up to `secs` for the chat line `text` to arrive in `s`.
+async fn wait_chat(s: &mut Session, col: &mut Collected, text: &str, secs: u64) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    while tokio::time::Instant::now() < deadline {
+        if col.chat.iter().any(|(_, t)| t == text) {
+            col.chat.retain(|(_, t)| t != text);
+            return true;
+        }
+        drain(s, Duration::from_secs(1), col).await;
+    }
+    false
 }
 
 fn write_summary(out: &Path, results: &[(String, bool)]) -> Result<()> {
