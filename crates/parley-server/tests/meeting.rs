@@ -296,3 +296,84 @@ async fn removed_meeting_closes_board_sockets_and_clears_the_board() {
     assert!(tokio_tungstenite::connect_async(&url).await.is_err());
     assert!(m.board_elements().is_empty());
 }
+
+/// Replays one scripted answer per call; an `Err` script fails the call.
+struct Stub(std::sync::Mutex<Vec<Result<Vec<parley_llm::Delta>, String>>>);
+
+impl parley_llm::LlmProvider for Stub {
+    async fn stream(
+        &self,
+        _req: parley_llm::ChatRequest,
+    ) -> Result<parley_llm::DeltaStream, parley_llm::LlmError> {
+        let script = self.0.lock().unwrap().remove(0);
+        let deltas = script.map_err(parley_llm::LlmError::Decode)?;
+        Ok(Box::pin(futures_util::stream::iter(
+            deltas.into_iter().map(Ok),
+        )))
+    }
+}
+
+fn call(name: &str, arguments: serde_json::Value) -> parley_llm::Delta {
+    parley_llm::Delta::ToolCall {
+        id: "c".into(),
+        name: name.into(),
+        arguments,
+    }
+}
+
+fn texts(m: &Meeting) -> String {
+    m.doc_json().to_string()
+}
+
+#[tokio::test]
+async fn request_creates_then_extends_the_doc_and_a_failure_changes_nothing() {
+    use parley_llm::{Delta, FinishReason};
+    use serde_json::json;
+    let m = Meeting::new(new_secret());
+    m.push(line("we should plan the launch"));
+    let (addr, _tx) = serve(m.clone()).await;
+    // A page that is open before the request must see the edit with no reload.
+    let url = format!("ws://{addr}/m/{}/doc/ws", m.secret());
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    let page = parley_artifacts::Artifact::new();
+    let stub = Stub(std::sync::Mutex::new(vec![
+        Ok(vec![
+            call("doc_create", json!({"title": "Launch plan"})),
+            Delta::Text("Started the doc.".into()),
+            Delta::End(FinishReason::ToolCalls),
+        ]),
+        Ok(vec![
+            call(
+                "doc_append",
+                json!({"type": "paragraph", "text": "Ship on Friday"}),
+            ),
+            Delta::End(FinishReason::ToolCalls),
+        ]),
+        Err("model down".into()),
+        Ok(vec![
+            Delta::Text("no tool call".into()),
+            Delta::End(FinishReason::Stop),
+        ]),
+    ]));
+
+    assert_eq!(m.request(&stub, "Parley", "Ana: hello").await, Ok(None));
+    let chat = m.request(&stub, "Parley", "Parley, start a doc").await;
+    assert_eq!(chat, Ok(Some("Started the doc.".into())));
+    assert!(texts(&m).contains("Launch plan"));
+    let chat = m.request(&stub, "Parley", "Parley, add the date").await;
+    assert_eq!(chat, Ok(Some("Done.".into())));
+    let both = texts(&m);
+    assert!(both.contains("Launch plan") && both.contains("Ship on Friday"));
+
+    assert!(m.request(&stub, "Parley", "Parley, again").await.is_err());
+    assert!(m.request(&stub, "Parley", "Parley, again").await.is_err());
+    assert_eq!(texts(&m), both, "a failed call leaves the doc unchanged");
+
+    // The open page received the full state of both edits over the doc socket.
+    while let Ok(Some(Ok(Message::Binary(b)))) =
+        tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await
+    {
+        page.apply_update(&b).unwrap();
+    }
+    assert_eq!(page.to_json().unwrap().to_string(), both);
+}

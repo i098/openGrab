@@ -21,9 +21,14 @@ use parley_artifacts::{
     Artifact, Error, Span,
     board::{Board, BoardDoc},
 };
+use parley_brain::{Transcript, find_request};
+use parley_llm::LlmProvider;
 use serde::Serialize;
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, mpsc};
+
+mod llm;
+pub use llm::Llm;
 
 const PAGE: &str = include_str!("../../../web/index.html");
 /// Built from `web/editor` with `bun run build`.
@@ -251,6 +256,44 @@ impl Meeting {
     /// Server-side edit of the live doc; every open page shows it at once.
     pub fn append_paragraph(&self, text: &str) {
         self.doc.edit(|d| d.append_paragraph(&[Span::plain(text)]));
+    }
+
+    /// Answer a request line "<name>, ..." by writing the live doc through the model.
+    /// `Ok(None)`: the text is no request. `Ok(Some(chat))`: the doc is edited and every open page shows it.
+    /// `Err`: the model failed or called a doc tool wrongly, and the doc is unchanged.
+    /// Concurrent requests are not serialized.
+    pub async fn request<P: LlmProvider>(
+        &self,
+        llm: &P,
+        name: &str,
+        text: &str,
+    ) -> Result<Option<String>, String> {
+        let Some(request) = find_request(text, name) else {
+            return Ok(None);
+        };
+        let mut transcript = Transcript::new();
+        for l in self.lines() {
+            transcript.push(parley_brain::Line {
+                speaker: l.speaker,
+                start_ms: l.at_ms,
+                text: l.text,
+            });
+        }
+        // Work on a copy so a failed call cannot leave half an edit; apply the result as one update.
+        let scratch = Artifact::new();
+        let state = self
+            .doc
+            .read(|d| d.encode())
+            .ok_or("the meeting was removed")?;
+        scratch.apply_update(&state).map_err(|e| e.to_string())?;
+        let chat = transcript
+            .write_doc(llm, request, &scratch)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.doc
+            .update(0, scratch.encode_update())
+            .map_err(|e| e.to_string())?;
+        Ok(Some(chat))
     }
 
     /// The live doc as Tiptap JSON.
