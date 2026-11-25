@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
+parley-artifacts = { path = "../parley-artifacts" }
 parley-llm = { path = "../parley-llm" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
