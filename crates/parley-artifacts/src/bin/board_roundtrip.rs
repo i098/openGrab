@@ -1,6 +1,5 @@
-//! Board -> layout -> Excalidraw elements -> Yjs -> Excalidraw -> Yjs -> board round trip.
-//! Run `cargo run -p parley-artifacts --bin board_roundtrip` (needs `bun install` in
-//! web/excalidraw-roundtrip). Prints each check, then PASS or FAIL.
+//! Rust driver for the Excalidraw round trip.
+//! See `web/excalidraw-roundtrip/README.md` for setup and usage.
 
 use std::{
     env, fs,

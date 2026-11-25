@@ -1,2 +1,3 @@
 # openGrab
-Open-source, provider-agnostic Rust meeting agent: Claude Meetings parity for Google Meet with any LLM
+
+An open-source Rust meeting agent for Google Meet that is not tied to one LLM provider.

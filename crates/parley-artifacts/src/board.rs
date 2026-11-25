@@ -1,9 +1,10 @@
 //! Board model, deterministic layered layout, and the `yrs` map of Excalidraw elements.
 //!
-//! The LLM names nodes, edges and groups. This module, not the LLM, computes every position.
-//! The board is one root `Y.Map` named [`BOARD`]. Its [`ELEMENTS`] key holds a `Y.Array` of Excalidraw elements: a rectangle with
-//! a bound text for each node, an arrow bound to both nodes for each edge, and `groupIds` on the
-//! members of each group. `@excalidraw/excalidraw` `restoreElements` accepts this shape.
+//! An LLM can supply the topology and labels. Rust computes all positions without a model or API call.
+//! [`BoardDoc`] uses a root `Y.Map` named [`BOARD`]. The [`ELEMENTS`] key holds a `Y.Array` of
+//! Excalidraw elements that `restoreElements` can read.
+//! Each node has a rectangle and bound text. Each edge has an arrow bound to both nodes.
+//! Group members and their group label share a `groupIds` entry.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -20,8 +21,7 @@ use yrs::{
 use crate::Error;
 
 pub const NODE_WIDTH: f64 = 180.0;
-// shortcut: a label past the 160x25 text box (about 90 characters at font 20) overflows into
-// the next row; cap labels at the point where they enter the board when that becomes possible.
+// shortcut: long labels can extend outside the fixed 160 × 25 text box; revisit if labels must fit inside nodes.
 pub const NODE_HEIGHT: f64 = 80.0;
 /// Horizontal space between layers.
 pub const LAYER_GAP: f64 = 120.0;
@@ -97,7 +97,9 @@ pub struct Layout {
 }
 
 impl Board {
-    /// Lay the board out in layers, with group members kept in one layer.
+    /// Lay the board out in layers.
+    ///
+    /// Keep group members in one layer, even when a cycle makes an arrow point left.
     pub fn layout(&self) -> Result<Layout, Error> {
         self.validate()?;
         let n = self.nodes.len();
@@ -578,8 +580,7 @@ impl BoardDoc {
             .encode_state_as_update_v1(&StateVector::default())
     }
 
-    /// Replace the whole element array. This crate is the single writer: edits a client made
-    /// to the same array since the last [`BoardDoc::elements`] read are discarded.
+    /// Replace the whole array for a single writer. Do not use this method to merge concurrent edits.
     pub fn set_elements(&self, elements: &[Value]) {
         let mut txn = self.doc.transact_mut();
         let array: ArrayRef = self.board.get_or_init(&mut txn, ELEMENTS);

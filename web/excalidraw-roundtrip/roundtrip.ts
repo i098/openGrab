@@ -1,10 +1,5 @@
 // Usage: bun run roundtrip.ts <in.bin> <out.bin> <board.png>
-//
-// Loads a Yjs update whose root map "board" holds an "elements" array of Excalidraw elements
-// written by Rust. Restores them with @excalidraw/excalidraw, moves one node with its text and
-// arrow ends, checks the edited scene, exports it as a PNG with Excalidraw's own export helper,
-// and writes that same scene back into the array. Prints a JSON report on stdout.
-// The Rust bin `board_roundtrip` reads it.
+// Stdout contains only the JSON report that the Rust `board_roundtrip` binary reads.
 import { Window } from "happy-dom";
 import { createCanvas } from "@napi-rs/canvas";
 import { Resvg } from "@resvg/resvg-js";

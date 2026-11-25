@@ -1,9 +1,9 @@
-//! A `yrs` document in the `y-prosemirror` layout that `@tiptap/extension-collaboration` reads.
+//! Meeting artifacts stored in `yrs`: Tiptap documents and [Excalidraw boards](board).
 //!
-//! Layout: one root `XmlFragment` named [`FRAGMENT`]. Block nodes are `XmlElement`s named like the
-//! Tiptap node type (`paragraph`, `heading`, `bulletList`, `listItem`). Node attributes are element
-//! attributes (`level` is a number). Text is an `XmlText` whose formatting attributes are the marks
-//! (`bold`, `italic`), each with an object value holding the mark attributes.
+//! A Tiptap [`Artifact`] uses the `y-prosemirror` layout with one root `XmlFragment` named [`FRAGMENT`].
+//! Block nodes use `XmlElement` names that match Tiptap node types: `paragraph`, `heading`, `bulletList`, and `listItem`.
+//! `XmlElement` attributes store node attributes, such as the numeric heading `level`.
+//! Each `XmlText` formatting attribute stores a mark, such as `bold` or `italic`, as an object.
 
 use std::{collections::HashMap, sync::Arc};
 
