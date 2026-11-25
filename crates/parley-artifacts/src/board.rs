@@ -39,6 +39,7 @@ const NODE_FILL: &str = "#a5d8ff";
 const UPDATED: i64 = 1_700_000_000_000;
 const FONT_FAMILY: i64 = 5;
 const MAX_LABEL_WIDTH: f64 = 100.0;
+const MAX_EDGE_LABEL_CHARS: usize = 16;
 
 /// A board as the LLM names it: no coordinates.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,8 +349,8 @@ impl Board {
                 .as_deref()
                 .filter(|label| !label.trim().is_empty())
             {
-                let (mx, my, vertical) = label_anchor(&route);
-                let (mask, height) = label_size(label, vertical);
+                let (mx, my) = label_anchor(&route);
+                let (mask, height) = label_size(label);
                 arrow_bound.push(json!({"type": "text", "id": format!("edge-text:{i}")}));
                 let (tx, ty) = (mx - mask / 2.0, my - height / 2.0);
                 let mut text = bound_text(
@@ -407,6 +408,12 @@ impl Board {
             }
         }
         for edge in &self.edges {
+            let label = edge.label.as_deref().filter(|l| !l.trim().is_empty());
+            if label.map_or(0, |l| l.chars().count()) > MAX_EDGE_LABEL_CHARS {
+                return Err(Error::Invalid(format!(
+                    "edge label is longer than {MAX_EDGE_LABEL_CHARS} characters"
+                )));
+            }
             if edge.from == edge.to {
                 return Err(Error::Invalid(format!(
                     "edge loops back to node {:?}",
@@ -523,25 +530,21 @@ fn crosses(a: (f64, f64), b: (f64, f64), n: &Placed) -> bool {
     t0 <= t1
 }
 
-/// Size of the label mask at font size 16: about 10 px a character, plus padding.
-/// Excalidraw centres it on the arrow, so it wraps at 100 px on a horizontal shaft
-/// and at 400 px on a vertical one, where the height is what hides the shaft.
-fn label_size(label: &str, vertical: bool) -> (f64, f64) {
-    let max_width = if vertical { 400.0 } else { MAX_LABEL_WIDTH };
+/// Size of the label mask at font size 16: about 10 px a character, plus padding, wrapped at 100 px.
+/// `validate` caps a label at two lines, so the mask stays inside the 72 px row gap and the lanes.
+fn label_size(label: &str) -> (f64, f64) {
     let natural = label.chars().count() as f64 * 10.0 + 16.0;
-    (natural.min(max_width), 20.0 * (natural / max_width).ceil())
+    (
+        natural.min(MAX_LABEL_WIDTH),
+        20.0 * (natural / MAX_LABEL_WIDTH).ceil(),
+    )
 }
 
 /// Where Excalidraw centres an arrow label: the midpoint of the middle segment of an even-length route.
-/// Also whether that segment is vertical.
-fn label_anchor(route: &[(f64, f64)]) -> (f64, f64, bool) {
+fn label_anchor(route: &[(f64, f64)]) -> (f64, f64) {
     let i = route.len() / 2 - 1;
     let (a, b) = (route[i], route[i + 1]);
-    (
-        (a.0 + b.0) / 2.0,
-        (a.1 + b.1) / 2.0,
-        (a.0 - b.0).abs() < 1.0,
-    )
+    ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0)
 }
 
 fn arrow_ends(from: &Placed, to: &Placed) -> (f64, f64, f64, f64) {
@@ -1152,12 +1155,12 @@ mod tests {
 
     #[test]
     fn a_label_leaves_the_arrow_shaft_visible() {
-        let long = "a very long label that would hide the whole arrow shaft";
+        let long = "sixteen chars lb";
         let row = chain(
             &[
                 ("a", "b", Some("ready")),
                 ("b", "c", Some(long)),
-                ("a", "c", Some("skip")),
+                ("a", "c", Some(long)),
             ],
             &["a", "b", "c"],
         );
@@ -1180,6 +1183,11 @@ mod tests {
                     to: "z".into(),
                     label: Some(long.into()),
                 },
+                Edge {
+                    from: "x".into(),
+                    to: "z".into(),
+                    label: Some(long.into()),
+                },
             ],
             groups: vec![Group {
                 id: "g".into(),
@@ -1189,7 +1197,7 @@ mod tests {
         }
         .elements()
         .unwrap();
-        for (elements, edges) in [(&row, 3), (&column, 2)] {
+        for (elements, edges) in [(&row, 3), (&column, 3)] {
             for i in 0..edges {
                 let arrow = elements
                     .iter()
@@ -1228,5 +1236,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_edge_label_longer_than_two_lines_is_rejected() {
+        let too_long = "x".repeat(MAX_EDGE_LABEL_CHARS + 1);
+        let board = Board {
+            nodes: ["a", "b"]
+                .iter()
+                .map(|id| Node {
+                    id: (*id).into(),
+                    label: (*id).into(),
+                })
+                .collect(),
+            edges: vec![Edge {
+                from: "a".into(),
+                to: "b".into(),
+                label: Some(too_long),
+            }],
+            groups: Vec::new(),
+        };
+        assert!(matches!(board.elements(), Err(Error::Invalid(_))));
     }
 }
