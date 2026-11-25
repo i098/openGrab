@@ -1,7 +1,7 @@
 //! `write_doc()` with a scripted provider: calls apply in order, a bad call applies nothing.
 
 use futures_util::stream;
-use parley_artifacts::Artifact;
+use parley_artifacts::{Artifact, Span};
 use parley_brain::{BrainError, Transcript};
 use parley_llm::{ChatRequest, Delta, DeltaStream, FinishReason, LlmError, LlmProvider};
 use serde_json::{Value, json};
@@ -25,7 +25,10 @@ fn call(name: &str, arguments: Value) -> Delta {
 }
 
 async fn run(script: Vec<Delta>) -> (Result<String, BrainError>, Value) {
-    let doc = Artifact::new();
+    run_on(Artifact::new(), script).await
+}
+
+async fn run_on(doc: Artifact, script: Vec<Delta>) -> (Result<String, BrainError>, Value) {
     let r = Transcript::new()
         .write_doc(
             &Script(script),
@@ -34,6 +37,43 @@ async fn run(script: Vec<Delta>) -> (Result<String, BrainError>, Value) {
         )
         .await;
     (r, doc.to_json().unwrap())
+}
+
+fn doc_with_title() -> Artifact {
+    let doc = Artifact::new();
+    doc.insert_heading(0, 1, &[Span::plain("Launch plan")]);
+    doc
+}
+
+#[tokio::test]
+async fn append_extends_an_existing_document() {
+    let (r, doc) = run_on(
+        doc_with_title(),
+        vec![call(
+            "doc_append",
+            json!({"type": "paragraph", "text": "Action items."}),
+        )],
+    )
+    .await;
+    r.unwrap();
+    let kinds: Vec<_> = doc["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["heading", "paragraph"]);
+}
+
+#[tokio::test]
+async fn create_on_a_document_with_content_is_rejected() {
+    let (r, doc) = run_on(
+        doc_with_title(),
+        vec![call("doc_create", json!({"title": "Second"}))],
+    )
+    .await;
+    assert!(matches!(r, Err(BrainError::BadDocCall(_))));
+    assert_eq!(doc["content"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]

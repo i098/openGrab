@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 pub const DOC_CREATE: &str = "doc_create";
 pub const DOC_APPEND: &str = "doc_append";
 
-const SYSTEM: &str = "You write a shared document for a meeting. Read the transcript and the request. Call doc_create once with the title, then call doc_append once for each block, in reading order: headings, paragraphs and bullet lists. Then reply with one short chat line, and no link.";
+const SYSTEM: &str = "You write a shared document for a meeting. Read the transcript and the request. If the document is empty, call doc_create once with the title first. If it already has content, never call doc_create. Call doc_append once for each block you add, in reading order: headings, paragraphs and bullet lists. Then reply with one short chat line, and no link.";
 
 const DONE_LINE: &str = "Done.";
 
@@ -39,19 +39,26 @@ fn text(s: &str) -> Result<Vec<Span>, BrainError> {
 }
 
 /// Check every call before any is applied: a rejected call leaves the document unchanged.
-fn parse(calls: Vec<(String, Value)>) -> Result<Vec<Edit>, BrainError> {
+/// `has_content`: the document already has blocks, so `doc_create` is refused and `doc_append` is allowed first.
+fn parse(calls: Vec<(String, Value)>, has_content: bool) -> Result<Vec<Edit>, BrainError> {
     if calls.is_empty() {
         return Err(BrainError::NoToolCall);
     }
     let mut edits = Vec::with_capacity(calls.len());
     for (name, args) in calls {
         let edit = match name.as_str() {
-            DOC_CREATE if edits.is_empty() => {
+            DOC_CREATE if edits.is_empty() && !has_content => {
                 let c: Create = serde_json::from_value(args).map_err(bad)?;
                 Edit::Heading(1, text(&c.title)?)
             }
-            DOC_CREATE => return Err(bad("doc_create must be the first call, and only once")),
-            DOC_APPEND if edits.is_empty() => return Err(bad("doc_append before doc_create")),
+            DOC_CREATE => {
+                return Err(bad(
+                    "doc_create must be the first call, once, on an empty document",
+                ));
+            }
+            DOC_APPEND if edits.is_empty() && !has_content => {
+                return Err(bad("doc_append before doc_create"));
+            }
             DOC_APPEND => match serde_json::from_value(args).map_err(bad)? {
                 Block::Paragraph { text: t } => Edit::Paragraph(text(&t)?),
                 Block::Heading { level, text: t } if (1..=6).contains(&level) => {
@@ -89,10 +96,17 @@ impl Transcript {
         request: &str,
         doc: &Artifact,
     ) -> Result<String, BrainError> {
+        let current = doc.to_json().map_err(bad)?;
+        let has_content = current["content"].as_array().is_some_and(|c| !c.is_empty());
+        let state = if has_content {
+            format!("Current document (JSON):\n{current}")
+        } else {
+            "The document is empty.".to_string()
+        };
         let req = ChatRequest {
             system: Some(SYSTEM.into()),
             messages: vec![Message::user(format!(
-                "Transcript:\n{}\nRequest: {request}",
+                "Transcript:\n{}\n{state}\nRequest: {request}",
                 self.render()
             ))],
             tools: vec![create_tool(), append_tool()],
@@ -109,7 +123,7 @@ impl Transcript {
                 Delta::End(_) => {}
             }
         }
-        for edit in parse(calls)? {
+        for edit in parse(calls, has_content)? {
             match edit {
                 Edit::Heading(level, spans) => doc.insert_heading(u32::MAX, level, &spans),
                 Edit::Paragraph(spans) => doc.append_paragraph(&spans),
@@ -128,7 +142,7 @@ impl Transcript {
 fn create_tool() -> ToolDef {
     ToolDef {
         name: DOC_CREATE.into(),
-        description: "Start the document with its title. Call it once, first.".into(),
+        description: "Start an empty document with its title. Call it once, first, and never on a document that already has content.".into(),
         parameters: json!({
             "type": "object",
             "properties": {"title": {"type": "string"}},
