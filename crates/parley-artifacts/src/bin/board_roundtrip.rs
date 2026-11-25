@@ -164,6 +164,22 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         check(&format!("web {name}"), value == &Value::Bool(true));
     }
     check("web ok", report["ok"] == Value::Bool(true));
+    check("bun exit", run.status.success());
+    for reason in report["reasons"].as_array().into_iter().flatten() {
+        println!("bun: {}", reason.as_str().unwrap_or_default());
+    }
+    check(
+        "web node count",
+        report["counts"]["nodes"].as_u64() == Some(board.nodes.len() as u64),
+    );
+    check(
+        "web edge count",
+        report["counts"]["edges"].as_u64() == Some(board.edges.len() as u64),
+    );
+    check(
+        "web group count",
+        report["counts"]["groups"].as_u64() == Some(board.groups.len() as u64),
+    );
 
     check("element count kept", back.len() == before.len());
     check("element ids kept", ids(&back) == ids(&before));
@@ -204,11 +220,17 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
     let mut arrows_kept = true;
     let mut groups_kept = true;
     let mut others_kept = true;
+    let mut texts_kept = true;
     for (old, new) in before.iter().zip(back.iter()) {
         let id = old["id"].clone();
         if old["type"] == "arrow" {
             arrows_kept &= old["startBinding"] == new["startBinding"]
                 && old["endBinding"] == new["endBinding"];
+        }
+        if old["type"] == "text" {
+            texts_kept &= old["text"] == new["text"]
+                && old["originalText"] == new["originalText"]
+                && old["fontSize"] == new["fontSize"];
         }
         if old["groupIds"] != new["groupIds"] {
             groups_kept = false;
@@ -219,6 +241,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         }
     }
     check("arrow bindings kept", arrows_kept);
+    check("text content kept", texts_kept);
     check("group ids kept", groups_kept);
     check("other nodes unmoved", others_kept);
     check(

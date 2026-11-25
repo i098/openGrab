@@ -20,11 +20,15 @@ use yrs::{
 use crate::Error;
 
 pub const NODE_WIDTH: f64 = 180.0;
+// shortcut: a label past the 160x25 text box (about 90 characters at font 20) overflows into
+// the next row; cap labels at the point where they enter the board when that becomes possible.
 pub const NODE_HEIGHT: f64 = 80.0;
 /// Horizontal space between layers.
 pub const LAYER_GAP: f64 = 120.0;
 /// Vertical space between rows.
 pub const ROW_GAP: f64 = 48.0;
+/// Space between a group box and its label above it.
+pub const GROUP_LABEL_OFFSET: f64 = 30.0;
 /// Space between a group box and its member nodes.
 pub const GROUP_PADDING: f64 = 8.0;
 /// Name of the root `Y.Array`, read and written by the web round trip.
@@ -100,37 +104,52 @@ impl Board {
     pub fn layout(&self) -> Result<Layout, Error> {
         self.validate()?;
         let n = self.nodes.len();
+        let index: HashMap<&str, usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| (node.id.as_str(), i))
+            .collect();
+        let lookup = |id: &str| {
+            index
+                .get(id)
+                .copied()
+                .ok_or_else(|| Error::Invalid(format!("unknown node {id:?}")))
+        };
+        let mut group_of = vec![None; n];
+        let mut column: Vec<_> = (0..n).collect();
+        for group in &self.groups {
+            let first = lookup(&group.members[0])?;
+            for member in &group.members {
+                let i = lookup(member)?;
+                group_of[i] = Some(group);
+                column[i] = first;
+            }
+        }
+        let mut edges = Vec::with_capacity(self.edges.len());
+        for edge in &self.edges {
+            let (from, to) = (column[lookup(&edge.from)?], column[lookup(&edge.to)?]);
+            if from != to {
+                edges.push((from, to));
+            }
+        }
+        // Cycles, including those formed by grouping, can have backward arrows.
+        // Bound relaxation so cyclic boards still get a deterministic layout.
         let mut layer = vec![0u32; n];
-        // Longest-path relaxation converges in at most n-1 rounds on a DAG. Cycles keep
-        // growing, so the dense renumbering below bounds them to one column per node.
         for _ in 0..n {
-            for edge in &self.edges {
-                let (from, to) = (self.index(&edge.from)?, self.index(&edge.to)?);
-                layer[to] = layer[to].max(layer[from] + 1);
+            let mut changed = false;
+            for &(from, to) in &edges {
+                let next = layer[from] + 1;
+                if next > layer[to] {
+                    layer[to] = next;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
             }
         }
-
-        let mut group_of: Vec<Option<&Group>> = vec![None; n];
-        for group in &self.groups {
-            for member in &group.members {
-                group_of[self.index(member)?] = Some(group);
-            }
-        }
-        // A group sits in one column: its members take the group's highest layer.
-        for group in &self.groups {
-            let top = group
-                .members
-                .iter()
-                .map(|m| self.index(m))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .map(|i| layer[i])
-                .max()
-                .unwrap_or(0);
-            for member in &group.members {
-                layer[self.index(member)?] = top;
-            }
-        }
+        let layer: Vec<_> = column.into_iter().map(|i| layer[i]).collect();
 
         // Dense renumbering: empty columns are removed and the order of layers is kept.
         let mut levels: Vec<u32> = layer.clone();
@@ -184,7 +203,7 @@ impl Board {
             let members: Vec<&Placed> = group
                 .members
                 .iter()
-                .map(|m| self.index(m))
+                .map(|m| lookup(m))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .map(|i| &placed[i])
@@ -211,8 +230,38 @@ impl Board {
             });
         }
 
-        let width = placed.iter().map(|p| p.x + p.width).fold(0.0, f64::max);
-        let height = placed.iter().map(|p| p.y + p.height).fold(0.0, f64::max);
+        // Shift so the leftmost box and the topmost group label start at the origin.
+        if n > 0 {
+            let min_x = placed
+                .iter()
+                .map(|p| p.x)
+                .chain(groups.iter().map(|g| g.x))
+                .fold(f64::INFINITY, f64::min);
+            let min_y = placed
+                .iter()
+                .map(|p| p.y)
+                .chain(groups.iter().flat_map(|g| [g.y, g.y - GROUP_LABEL_OFFSET]))
+                .fold(f64::INFINITY, f64::min);
+            for p in &mut placed {
+                p.x -= min_x;
+                p.y -= min_y;
+            }
+            for g in &mut groups {
+                g.x -= min_x;
+                g.y -= min_y;
+            }
+        }
+
+        let width = placed
+            .iter()
+            .map(|p| p.x + p.width)
+            .chain(groups.iter().map(|g| g.x + g.width))
+            .fold(0.0, f64::max);
+        let height = placed
+            .iter()
+            .map(|p| p.y + p.height)
+            .chain(groups.iter().map(|g| g.y + g.height))
+            .fold(0.0, f64::max);
         Ok(Layout {
             nodes: placed,
             groups,
@@ -330,7 +379,7 @@ impl Board {
                 &format!("label:{}", group.id),
                 &group.label,
                 group.x,
-                group.y - 30.0,
+                group.y - GROUP_LABEL_OFFSET,
                 120.0,
                 22.0,
                 14,
@@ -339,13 +388,6 @@ impl Board {
             ));
         }
         Ok(out)
-    }
-
-    fn index(&self, id: &str) -> Result<usize, Error> {
-        self.nodes
-            .iter()
-            .position(|n| n.id == id)
-            .ok_or_else(|| Error::Invalid(format!("unknown node {id:?}")))
     }
 
     fn group_ids(&self) -> HashMap<&str, &str> {
@@ -376,13 +418,14 @@ impl Board {
             }
         }
         let mut groups = HashSet::new();
+        let mut member_of: HashMap<&str, &str> = HashMap::new();
         for group in &self.groups {
             if !groups.insert(group.id.as_str()) {
                 return Err(Error::Invalid(format!("duplicate group id {:?}", group.id)));
             }
-            if group.members.is_empty() {
+            if group.members.len() < 2 {
                 return Err(Error::Invalid(format!(
-                    "group {:?} has no members",
+                    "group {:?} has fewer than two members",
                     group.id
                 )));
             }
@@ -393,16 +436,11 @@ impl Board {
                         group.id
                     )));
                 }
-                if self
-                    .groups
-                    .iter()
-                    .filter(|g| g.members.contains(member))
-                    .count()
-                    > 1
+                if member_of
+                    .insert(member.as_str(), group.id.as_str())
+                    .is_some()
                 {
-                    return Err(Error::Invalid(format!(
-                        "node {member:?} is in more than one group"
-                    )));
+                    return Err(Error::Invalid(format!("repeated group member {member:?}")));
                 }
             }
         }
@@ -564,7 +602,8 @@ impl BoardDoc {
             .encode_state_as_update_v1(&StateVector::default())
     }
 
-    /// Replace the whole element array.
+    /// Replace the whole element array. This crate is the single writer: edits a client made
+    /// to the same array since the last [`BoardDoc::elements`] read are discarded.
     pub fn set_elements(&self, elements: &[Value]) {
         let mut txn = self.doc.transact_mut();
         let len = self.elements.len(&txn);
@@ -769,6 +808,40 @@ mod tests {
             groups: vec![],
         };
         assert_eq!(board.layout().unwrap(), board.layout().unwrap());
+    }
+
+    #[test]
+    fn collapsing_a_group_keeps_external_edges_pointing_right() {
+        let node = |id: &str| Node {
+            id: id.into(),
+            label: id.into(),
+        };
+        let edge = |from: &str, to: &str| Edge {
+            from: from.into(),
+            to: to.into(),
+            label: None,
+        };
+        let board = Board {
+            nodes: vec![node("a"), node("b"), node("c"), node("d")],
+            edges: vec![edge("a", "b"), edge("c", "d")],
+            groups: vec![Group {
+                id: "g".into(),
+                label: "G".into(),
+                members: vec!["b".into(), "c".into()],
+            }],
+        };
+        let layout = board.layout().unwrap();
+        let x = |id: &str| layout.node(id).unwrap().x;
+        assert_eq!(x("b"), x("c"), "the group keeps one column");
+        assert!(x("b") > x("a"));
+        assert!(x("d") > x("c"), "the edge after the group points right");
+    }
+
+    #[test]
+    fn one_node_group_is_rejected() {
+        let mut board = sample();
+        board.groups[0].members.truncate(1);
+        assert!(board.layout().is_err());
     }
 
     #[test]
