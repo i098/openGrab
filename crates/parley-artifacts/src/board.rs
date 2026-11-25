@@ -4,6 +4,8 @@
 //! [`BoardDoc`] uses a root `Y.Map` named [`BOARD`]. The [`ELEMENTS`] key holds a `Y.Array` of
 //! Excalidraw elements that `restoreElements` can read.
 //! Each node has a rectangle and bound text. Each edge has an arrow bound to both nodes.
+//! An arrow goes around the nodes in its way when a free lane exists. If no lane is free,
+//! it stays a straight line and can cross a node.
 //! Group members and their group label share a `groupIds` entry.
 
 use std::{
@@ -39,6 +41,7 @@ const NODE_FILL: &str = "#a5d8ff";
 const UPDATED: i64 = 1_700_000_000_000;
 const FONT_FAMILY: i64 = 5;
 const MAX_LABEL_WIDTH: f64 = 100.0;
+/// Longest edge label `validate` accepts. At 16 characters the mask wraps to two lines.
 const MAX_EDGE_LABEL_CHARS: usize = 16;
 
 /// A board as the LLM names it: no coordinates.
@@ -61,6 +64,7 @@ pub struct Node {
 pub struct Edge {
     pub from: String,
     pub to: String,
+    /// Optional text on the arrow. `validate` rejects a label of more than 16 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
