@@ -1327,6 +1327,8 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "parley-artifacts",
+ "parley-brain",
+ "parley-llm",
  "serde",
  "serde_json",
  "subtle",

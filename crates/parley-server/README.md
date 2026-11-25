@@ -8,6 +8,9 @@ One meeting page with a live transcript. The server owns the state (running, pau
 - `POST /m/<secret>/pause`, `/resume` and `/remove` change the state and answer `{"state": ...}`. Pause works only from running, resume only from paused. Remove is final: it drops the transcript and the page says the session was removed.
 - `app(meeting)` returns the router and one `mpsc::Sender<Line>`. Every transcript source feeds lines through that channel. A line that arrives while paused or removed is dropped.
 
+- `Meeting::request(llm, name, text)` answers a request line ("Parley, start a doc for the launch plan"). It runs `parley_brain` `write_doc` on a copy of the live doc with the transcript so far, then applies the result as one update, so every open page shows it with no reload. It returns the chat line. A failed model call or a bad tool call returns an error and leaves the doc unchanged. Text that is no request returns `None`.
+- `Llm::from_env()` picks the model from `PARLEY_LLM` (`openai` or `anthropic`, then the `parley-llm` variables). There is no default: unset is an error and the doc stays unchanged.
+
 ## Run
 
 `page_demo` feeds one line about every 2 seconds from a file of `Speaker: text` lines and prints the page URL.
@@ -17,6 +20,14 @@ Set `PAGE_DEMO_ADDR` (default `127.0.0.1:8080`) and `PAGE_DEMO_BASE` (default `h
 cargo run -p parley-server --bin page_demo -- meeting.txt
 ```
 
+A stdin line that starts with the bot name is a request. With a local Ollama:
+
+```sh
+PARLEY_LLM=openai OPENAI_BASE_URL=http://127.0.0.1:11434/v1 OPENAI_MODEL=qwen2.5:7b \
+  cargo run -p parley-server --bin page_demo -- meeting.txt
+# then type: Parley, start a doc for the launch plan
+```
+
 ## Test
 
-`cargo test -p parley-server` checks the secret, the pause, resume and remove states, one line received over a WebSocket, and the doc and board sync (two clients and a server edit converge). No network.
+`cargo test -p parley-server` checks the secret, the pause, resume and remove states, one line received over a WebSocket, the doc and board sync (two clients and a server edit converge), and a request that creates a doc, extends it, and leaves it unchanged on a failed call (stub model). No network.
