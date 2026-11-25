@@ -19,6 +19,8 @@ The attached bot ignores `--profile` and does not need a local Chromium binary o
 The speakers still start their own Chromium.
 Attach mode does not record URLs or text from pages outside Meet.
 It saves a screenshot only if the same Meet document remains active through capture.
+The driver creates a new owner-only evidence directory for each attached run and prints its path.
+To use `--out`, give a new directory path under an existing parent that you trust.
 
     scripts/p0-exit.sh <meet-link> --attach 9523 --checks join
 

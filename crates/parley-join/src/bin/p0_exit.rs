@@ -7,6 +7,7 @@ use parley_join::analysis::{rms, speaking_match, wav_bytes};
 use parley_join::protocol::{CallEvent, PageMsg, Participant};
 use parley_join::{Browser, Opts, Outcome, Role, Session};
 use std::collections::{BTreeMap, VecDeque};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -15,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 struct Args {
     /// The Google Meet link.
     link: String,
-    /// Where logs, screenshots, audio and JSON go (default: <temp dir>/parley-p0-out/<epoch>).
+    /// Evidence directory. With --attach, use a new directory under a trusted parent.
     #[arg(long)]
     out: Option<PathBuf>,
     /// Pinned Chromium binary (default: the newest under ~/.local/share/opengrab/chromium).
@@ -147,6 +148,32 @@ fn temp_profile(tag: &str) -> PathBuf {
         .join(tag)
 }
 
+fn create_output_dir(out: Option<PathBuf>, attached: bool) -> Result<PathBuf> {
+    let out = out.unwrap_or_else(|| {
+        let name = if attached {
+            format!("parley-p0-out-{}-{}", now_ms(), std::process::id())
+        } else {
+            format!("parley-p0-out/{}", now_ms() / 1000)
+        };
+        std::env::temp_dir().join(name)
+    });
+    if attached {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&out)
+            .with_context(|| {
+                format!(
+                    "creating a new private evidence directory at {}",
+                    out.display()
+                )
+            })?;
+        println!("evidence: {}", out.display());
+    } else {
+        std::fs::create_dir_all(&out)?;
+    }
+    Ok(out)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let a = Args::parse();
@@ -164,11 +191,7 @@ async fn main() -> Result<()> {
         (None, None) => "guest",
     };
     let want = |c: &str| a.checks.iter().any(|x| x == c);
-    let out = a
-        .out
-        .clone()
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("parley-p0-out/{}", now_ms() / 1000)));
-    std::fs::create_dir_all(&out)?;
+    let out = create_output_dir(a.out.clone(), a.attach.is_some())?;
     let mut chrome = a.chrome.clone();
     let mut results = Vec::new();
     let mut col = Collected::default();

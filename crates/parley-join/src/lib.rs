@@ -254,6 +254,7 @@ impl Session {
             "ws": ws_url,
             "role": if matches!(self.opts.role, Role::Bot) { "bot" } else { "speaker" },
             "name": self.opts.name,
+            "attached": self.attached(),
             "selectors": selectors::load()?,
         });
         // Without `Page.enable` the new-document script did not run in this setup.
@@ -440,8 +441,6 @@ impl Session {
         let js_text = serde_json::to_string(text)?;
         self.open_chat().await?;
         let before: u32 = self.eval(&format!("__parley.chatCount({js_text})")).await?;
-        self.eval::<serde_json::Value>(&format!("__parley.rememberSent({js_text})"))
-            .await?;
         self.click("chatComposer").await?;
         self.insert_text(text).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;

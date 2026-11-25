@@ -6,8 +6,11 @@ const vm = require('node:vm');
 const selectors = require('./selectors.json');
 const script = new vm.Script(fs.readFileSync(`${__dirname}/inject.js`, 'utf8'));
 
-function meetPage({ buttons, elements = {}, window = new EventTarget() }) {
-  window.__PARLEY_CFG = { ws: 'ws://localhost', role: 'bot', name: 'Test', selectors };
+function meetPage({
+  buttons, elements = {}, attached = false, name = 'Test',
+  window = new EventTarget(), tick = () => {}, send = () => {},
+}) {
+  window.__PARLEY_CFG = { ws: 'ws://localhost', role: 'bot', name, attached, selectors };
   window.top = window;
   script.runInNewContext({
     window,
@@ -23,8 +26,11 @@ function meetPage({ buttons, elements = {}, window = new EventTarget() }) {
       }),
     },
     navigator: {},
-    WebSocket: class {},
-    setInterval() {},
+    WebSocket: class {
+      readyState = 1;
+      send = send;
+    },
+    setInterval: tick,
   });
   return window.__parley;
 }
@@ -69,4 +75,41 @@ test('leaving and returning to a Meet document invalidates an active capture', (
   const after = page.screenshotDocument();
   assert.notEqual(after, before);
   assert.equal(page.screenshotDocument(), after);
+});
+
+test('attached chat reads the host even when the host shares the tile label', () => {
+  const messages = [];
+  const received = [];
+  let scan;
+  const page = meetPage({
+    buttons: [],
+    attached: true,
+    name: 'Sam',
+    elements: {
+      '[data-self-name]': { getAttribute: () => 'Alex' },
+      'button[aria-label="Leave call"]': button(''),
+      '[jsname="xySENc"]': {
+        querySelectorAll: (selector) => selector === '[data-message-id]' ? messages : [],
+      },
+    },
+    tick: (fn, ms) => { if (ms === 1000) scan = fn; },
+    send: (raw) => {
+      const msg = JSON.parse(raw);
+      if (msg.t === 'chat') received.push([msg.sender, msg.text]);
+    },
+  });
+  const message = (sender, id, textContent) => ({
+    textContent,
+    getAttribute: (attr) => ({ 'data-sender-name': sender, 'data-message-id': id })[attr],
+    querySelector: () => null,
+  });
+  scan();
+  messages.push(
+    message('Sam', '1', 'Host question'),
+    message('Alex', '2', 'Bot reply'),
+    message('You', '3', 'Another bot reply'),
+  );
+  scan();
+  assert.deepEqual(received, [['Sam', 'Host question']]);
+  assert.equal(page.chatCount('Bot reply'), 1);
 });
