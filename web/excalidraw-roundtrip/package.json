@@ -2,9 +2,6 @@
   "name": "excalidraw-roundtrip",
   "private": true,
   "type": "module",
-  "scripts": {
-    "start": "bun run roundtrip.ts"
-  },
   "dependencies": {
     "@excalidraw/excalidraw": "^0.18.1",
     "@napi-rs/canvas": "^1.2.0",

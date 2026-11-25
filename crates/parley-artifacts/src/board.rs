@@ -1,7 +1,7 @@
 //! Board model, deterministic layered layout, and the `yrs` map of Excalidraw elements.
 //!
 //! The LLM names nodes, edges and groups. This module, not the LLM, computes every position.
-//! The map is one root `Y.Array` named [`ELEMENTS`] holding Excalidraw elements: a rectangle with
+//! The board is one root `Y.Map` named [`BOARD`]. Its [`ELEMENTS`] key holds a `Y.Array` of Excalidraw elements: a rectangle with
 //! a bound text for each node, an arrow bound to both nodes for each edge, and `groupIds` on the
 //! members of each group. `@excalidraw/excalidraw` `restoreElements` accepts this shape.
 
@@ -13,8 +13,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use yrs::{
-    Any, Array, ArrayRef, Doc, Number, Out, ReadTxn, StateVector, Transact, Update,
-    updates::decoder::Decode,
+    Any, Array, ArrayRef, Doc, Map as _, MapRef, Number, Out, ReadTxn, StateVector, Transact,
+    Update, updates::decoder::Decode,
 };
 
 use crate::Error;
@@ -27,11 +27,11 @@ pub const NODE_HEIGHT: f64 = 80.0;
 pub const LAYER_GAP: f64 = 120.0;
 /// Vertical space between rows.
 pub const ROW_GAP: f64 = 48.0;
-/// Space between a group box and its label above it.
+/// Space between the top member of a group and its label above it.
 pub const GROUP_LABEL_OFFSET: f64 = 30.0;
-/// Space between a group box and its member nodes.
-pub const GROUP_PADDING: f64 = 8.0;
-/// Name of the root `Y.Array`, read and written by the web round trip.
+/// Name of the root `Y.Map`, read and written by the web round trip.
+pub const BOARD: &str = "board";
+/// Key in that map of the `Y.Array` of Excalidraw elements.
 pub const ELEMENTS: &str = "elements";
 
 const STROKE: &str = "#1e1e1e";
@@ -84,10 +84,9 @@ pub struct Placed {
 pub struct PlacedGroup {
     pub id: String,
     pub label: String,
+    /// Position of the group label.
     pub x: f64,
     pub y: f64,
-    pub width: f64,
-    pub height: f64,
 }
 
 /// Every position the layout computed.
@@ -95,8 +94,6 @@ pub struct PlacedGroup {
 pub struct Layout {
     pub nodes: Vec<Placed>,
     pub groups: Vec<PlacedGroup>,
-    pub width: f64,
-    pub height: f64,
 }
 
 impl Board {
@@ -133,12 +130,41 @@ impl Board {
                 edges.push((from, to));
             }
         }
-        // Cycles, including those formed by grouping, can have backward arrows.
-        // Bound relaxation so cyclic boards still get a deterministic layout.
+        // Grouping can close a cycle. Drop each edge that closes one, found by a depth-first
+        // walk in input order, so every other edge points right and the dropped arrow points left.
+        let mut out = vec![Vec::new(); n];
+        for &(from, to) in &edges {
+            out[from].push(to);
+        }
+        let mut state = vec![0u8; n];
+        let mut forward = Vec::with_capacity(edges.len());
+        for root in 0..n {
+            if state[root] != 0 {
+                continue;
+            }
+            state[root] = 1;
+            let mut stack = vec![(root, 0usize)];
+            while let Some((node, next)) = stack.last_mut() {
+                let node = *node;
+                let Some(&to) = out[node].get(*next) else {
+                    state[node] = 2;
+                    stack.pop();
+                    continue;
+                };
+                *next += 1;
+                if state[to] != 1 {
+                    forward.push((node, to));
+                }
+                if state[to] == 0 {
+                    state[to] = 1;
+                    stack.push((to, 0));
+                }
+            }
+        }
         let mut layer = vec![0u32; n];
         for _ in 0..n {
             let mut changed = false;
-            for &(from, to) in &edges {
+            for &(from, to) in &forward {
                 let next = layer[from] + 1;
                 if next > layer[to] {
                     layer[to] = next;
@@ -167,8 +193,8 @@ impl Board {
         order.sort_by(|a, b| {
             let key = |i: usize| {
                 (
-                    group_of[i].map(|g| g.id.clone()).unwrap_or_default(),
-                    self.nodes[i].id.clone(),
+                    group_of[i].map(|g| g.id.as_str()),
+                    self.nodes[i].id.as_str(),
                 )
             };
             key(*a).cmp(&key(*b))
@@ -200,73 +226,30 @@ impl Board {
 
         let mut groups = Vec::with_capacity(self.groups.len());
         for group in &self.groups {
-            let members: Vec<&Placed> = group
+            let members = group
                 .members
                 .iter()
-                .map(|m| lookup(m))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .map(|i| &placed[i])
-                .collect();
-            let x = members.iter().map(|p| p.x).fold(f64::INFINITY, f64::min) - GROUP_PADDING;
-            let y = members.iter().map(|p| p.y).fold(f64::INFINITY, f64::min) - GROUP_PADDING;
-            let right = members
-                .iter()
-                .map(|p| p.x + p.width)
-                .fold(f64::NEG_INFINITY, f64::max)
-                + GROUP_PADDING;
-            let bottom = members
-                .iter()
-                .map(|p| p.y + p.height)
-                .fold(f64::NEG_INFINITY, f64::max)
-                + GROUP_PADDING;
+                .map(|m| lookup(m).map(|i| &placed[i]))
+                .collect::<Result<Vec<_>, _>>()?;
             groups.push(PlacedGroup {
                 id: group.id.clone(),
                 label: group.label.clone(),
-                x,
-                y,
-                width: right - x,
-                height: bottom - y,
+                x: members.iter().map(|p| p.x).fold(f64::INFINITY, f64::min),
+                y: members.iter().map(|p| p.y).fold(f64::INFINITY, f64::min) - GROUP_LABEL_OFFSET,
             });
         }
 
-        // Shift so the leftmost box and the topmost group label start at the origin.
-        if n > 0 {
-            let min_x = placed
-                .iter()
-                .map(|p| p.x)
-                .chain(groups.iter().map(|g| g.x))
-                .fold(f64::INFINITY, f64::min);
-            let min_y = placed
-                .iter()
-                .map(|p| p.y)
-                .chain(groups.iter().flat_map(|g| [g.y, g.y - GROUP_LABEL_OFFSET]))
-                .fold(f64::INFINITY, f64::min);
-            for p in &mut placed {
-                p.x -= min_x;
-                p.y -= min_y;
-            }
-            for g in &mut groups {
-                g.x -= min_x;
-                g.y -= min_y;
-            }
+        // Shift so the topmost group label starts at or below the origin.
+        let shift = groups.iter().map(|g| g.y).fold(0.0, f64::min);
+        for p in &mut placed {
+            p.y -= shift;
         }
-
-        let width = placed
-            .iter()
-            .map(|p| p.x + p.width)
-            .chain(groups.iter().map(|g| g.x + g.width))
-            .fold(0.0, f64::max);
-        let height = placed
-            .iter()
-            .map(|p| p.y + p.height)
-            .chain(groups.iter().map(|g| g.y + g.height))
-            .fold(0.0, f64::max);
+        for g in &mut groups {
+            g.y -= shift;
+        }
         Ok(Layout {
             nodes: placed,
             groups,
-            width,
-            height,
         })
     }
 
@@ -331,18 +314,17 @@ impl Board {
         for (i, edge) in self.edges.iter().enumerate() {
             let (from, to) = (layout.node(&edge.from)?, layout.node(&edge.to)?);
             let (sx, sy, ex, ey) = arrow_ends(from, to);
-            let (x, y) = (sx.min(ex), sy.min(ey));
             let mut arrow = base(
                 &format!("edge:{i}"),
                 "arrow",
-                x,
-                y,
+                sx,
+                sy,
                 (ex - sx).abs(),
                 (ey - sy).abs(),
                 "transparent",
             );
             arrow.insert("roundness".into(), json!({"type": 2}));
-            arrow.insert("points".into(), json!([[sx - x, sy - y], [ex - x, ey - y]]));
+            arrow.insert("points".into(), json!([[0, 0], [ex - sx, ey - sy]]));
             arrow.insert("lastCommittedPoint".into(), Value::Null);
             arrow.insert(
                 "startBinding".into(),
@@ -379,7 +361,7 @@ impl Board {
                 &format!("label:{}", group.id),
                 &group.label,
                 group.x,
-                group.y - GROUP_LABEL_OFFSET,
+                group.y,
                 120.0,
                 22.0,
                 14,
@@ -423,9 +405,9 @@ impl Board {
             if !groups.insert(group.id.as_str()) {
                 return Err(Error::Invalid(format!("duplicate group id {:?}", group.id)));
             }
-            if group.members.len() < 2 {
+            if group.members.is_empty() {
                 return Err(Error::Invalid(format!(
-                    "group {:?} has fewer than two members",
+                    "group {:?} has no members",
                     group.id
                 )));
             }
@@ -462,9 +444,6 @@ fn arrow_ends(from: &Placed, to: &Placed) -> (f64, f64, f64, f64) {
     let (cx2, cy2) = (to.x + to.width / 2.0, to.y + to.height / 2.0);
     let (dx, dy) = (cx2 - cx1, cy2 - cy1);
     let len = (dx * dx + dy * dy).sqrt();
-    if len == 0.0 {
-        return (cx1, cy1, cx1, cy1);
-    }
     let (ux, uy) = (dx / len, dy / len);
     let reach = |w: f64, h: f64| {
         let tx = if ux == 0.0 {
@@ -565,10 +544,10 @@ fn seed(id: &str) -> i64 {
     (hash & 0x7fff_ffff) as i64
 }
 
-/// A `yrs` document holding the board as an array of Excalidraw elements.
+/// A `yrs` document holding the board as a map whose `elements` key is an array of Excalidraw elements.
 pub struct BoardDoc {
     doc: Doc,
-    elements: ArrayRef,
+    board: MapRef,
 }
 
 impl Default for BoardDoc {
@@ -580,20 +559,15 @@ impl Default for BoardDoc {
 impl BoardDoc {
     pub fn new() -> Self {
         let doc = Doc::new();
-        let elements = doc.get_or_insert_array(ELEMENTS);
-        Self { doc, elements }
+        let board = doc.get_or_insert_map(BOARD);
+        Self { doc, board }
     }
 
     pub fn from_update(update: &[u8]) -> Result<Self, Error> {
         let board = Self::new();
-        board.apply_update(update)?;
-        Ok(board)
-    }
-
-    pub fn apply_update(&self, update: &[u8]) -> Result<(), Error> {
         let update = Update::decode_v1(update)?;
-        self.doc.transact_mut().apply_update(update)?;
-        Ok(())
+        board.doc.transact_mut().apply_update(update)?;
+        Ok(board)
     }
 
     pub fn encode_update(&self) -> Vec<u8> {
@@ -606,18 +580,24 @@ impl BoardDoc {
     /// to the same array since the last [`BoardDoc::elements`] read are discarded.
     pub fn set_elements(&self, elements: &[Value]) {
         let mut txn = self.doc.transact_mut();
-        let len = self.elements.len(&txn);
+        let array: ArrayRef = self.board.get_or_init(&mut txn, ELEMENTS);
+        let len = array.len(&txn);
         if len > 0 {
-            self.elements.remove_range(&mut txn, 0, len);
+            array.remove_range(&mut txn, 0, len);
         }
         let values: Vec<Any> = elements.iter().map(value_to_any).collect();
-        self.elements.insert_range(&mut txn, 0, values);
+        array.insert_range(&mut txn, 0, values);
     }
 
     pub fn elements(&self) -> Result<Vec<Value>, Error> {
         let txn = self.doc.transact();
-        let mut out = Vec::with_capacity(self.elements.len(&txn) as usize);
-        for value in self.elements.iter(&txn) {
+        let array = match self.board.get(&txn, ELEMENTS) {
+            None => return Ok(Vec::new()),
+            Some(Out::YArray(array)) => array,
+            Some(other) => return Err(Error::Unsupported(format!("elements of type {other:?}"))),
+        };
+        let mut out = Vec::with_capacity(array.len(&txn) as usize);
+        for value in array.iter(&txn) {
             match value {
                 Out::Any(any) => out.push(any_to_value(&any)?),
                 other => return Err(Error::Unsupported(format!("element of type {other:?}"))),
@@ -754,8 +734,8 @@ mod tests {
         let grouped = sample().layout().unwrap();
         assert_eq!(grouped.node("a").unwrap().x, grouped.node("b").unwrap().x);
         let group = &grouped.groups[0];
-        assert!(group.x <= grouped.node("a").unwrap().x);
-        assert!(group.y <= grouped.node("a").unwrap().y);
+        assert_eq!(group.x, grouped.node("a").unwrap().x);
+        assert!(group.y < grouped.node("a").unwrap().y);
     }
 
     #[test]
@@ -838,10 +818,59 @@ mod tests {
     }
 
     #[test]
-    fn one_node_group_is_rejected() {
+    fn groups_need_a_member_but_not_two() {
         let mut board = sample();
         board.groups[0].members.truncate(1);
+        assert!(board.layout().is_ok());
+        board.groups[0].members.clear();
         assert!(board.layout().is_err());
+    }
+
+    #[test]
+    fn cycle_through_a_group_keeps_the_external_edge_pointing_right() {
+        let node = |id: &str| Node {
+            id: id.into(),
+            label: id.into(),
+        };
+        let edge = |from: &str, to: &str| Edge {
+            from: from.into(),
+            to: to.into(),
+            label: None,
+        };
+        let board = Board {
+            nodes: vec![node("a1"), node("a2"), node("b"), node("c")],
+            edges: vec![edge("b", "c"), edge("a1", "b"), edge("b", "a2")],
+            groups: vec![Group {
+                id: "g".into(),
+                label: "G".into(),
+                members: vec!["a1".into(), "a2".into()],
+            }],
+        };
+        let layout = board.layout().unwrap();
+        let x = |id: &str| layout.node(id).unwrap().x;
+        assert_eq!(x("a1"), x("a2"));
+        assert!(x("b") > x("a1"));
+        assert!(x("c") > x("b"), "b -> c must not be the reversed edge");
+    }
+
+    #[test]
+    fn empty_group_id_does_not_pull_in_ungrouped_nodes() {
+        let node = |id: &str| Node {
+            id: id.into(),
+            label: id.into(),
+        };
+        let board = Board {
+            nodes: vec![node("a"), node("b"), node("c")],
+            edges: vec![],
+            groups: vec![Group {
+                id: String::new(),
+                label: "G".into(),
+                members: vec!["a".into(), "c".into()],
+            }],
+        };
+        let layout = board.layout().unwrap();
+        let gap = (layout.node("a").unwrap().y - layout.node("c").unwrap().y).abs();
+        assert_eq!(gap, NODE_HEIGHT + ROW_GAP, "a and c are neighbours");
     }
 
     #[test]
@@ -893,5 +922,14 @@ mod tests {
             same_numbers(Value::Array(back)),
             same_numbers(Value::Array(elements))
         );
+
+        // The Yjs contract the web side relies on: a root map whose "elements" key is an array.
+        let raw = Doc::new();
+        raw.transact_mut()
+            .apply_update(Update::decode_v1(&doc.encode_update()).unwrap())
+            .unwrap();
+        let root = raw.get_or_insert_map("board");
+        let txn = raw.transact();
+        assert!(matches!(root.get(&txn, "elements"), Some(Out::YArray(_))));
     }
 }

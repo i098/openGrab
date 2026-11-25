@@ -4,8 +4,10 @@
 
 use std::{
     env, fs,
-    path::{Path, PathBuf},
+    os::unix::fs::DirBuilderExt,
+    path::Path,
     process::{Command, ExitCode},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use parley_artifacts::board::{Board, BoardDoc, Edge, Group, Node};
@@ -107,25 +109,33 @@ fn sample() -> Board {
     }
 }
 
+/// Both ends of an arrow in scene coordinates.
+fn ends(arrow: &Value) -> Option<((f64, f64), (f64, f64))> {
+    let (x, y) = (arrow["x"].as_f64()?, arrow["y"].as_f64()?);
+    let points = arrow["points"].as_array()?;
+    let point = |p: &Value| Some((x + p[0].as_f64()?, y + p[1].as_f64()?));
+    Some((point(points.first()?)?, point(points.last()?)?))
+}
+
 fn run() -> Result<bool, Box<dyn std::error::Error>> {
     let board = sample();
     let elements = board.elements()?;
-    let layout = board.layout()?;
     println!(
-        "board: {} nodes, {} edges, {} groups -> layout {}x{}",
+        "board: {} nodes, {} edges, {} groups",
         board.nodes.len(),
         board.edges.len(),
         board.groups.len(),
-        layout.width,
-        layout.height
     );
 
     let doc = BoardDoc::new();
     doc.set_elements(&elements);
     let before = doc.elements()?;
 
-    let dir = env::temp_dir().join(format!("parley-board-{}", std::process::id()));
-    fs::create_dir_all(&dir)?;
+    // DirBuilder::create fails on an existing path, so the directory is new and owned by us.
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let dir = env::temp_dir().join(format!("parley-board-{}-{nanos}", std::process::id()));
+    fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    let dir = dir.canonicalize()?;
     let (input, output, png) = (
         dir.join("board.bin"),
         dir.join("board-back.bin"),
@@ -136,9 +146,9 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
     let web = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/excalidraw-roundtrip");
     let run = Command::new("bun")
         .args(["run", "roundtrip.ts"])
-        .arg(canonical(&input))
-        .arg(canonical(&output))
-        .arg(canonical(&png))
+        .arg(&input)
+        .arg(&output)
+        .arg(&png)
         .current_dir(web)
         .output()?;
     let report: Value = serde_json::from_slice(&run.stdout).map_err(|e| {
@@ -181,69 +191,77 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         report["counts"]["groups"].as_u64() == Some(board.groups.len() as u64),
     );
 
-    check("element count kept", back.len() == before.len());
     check("element ids kept", ids(&back) == ids(&before));
+    check(
+        "no element deleted",
+        back.iter().all(|e| e["isDeleted"] != Value::Bool(true)),
+    );
 
-    let moved_id = report["moved"]["id"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    let moved_before = element(&before, &moved_id)?;
+    let moved_id = report["moved"]["id"].as_str().unwrap_or_default();
+    let text_id = report["moved"]["text_id"].as_str().unwrap_or_default();
+    let moved_before = element(&before, moved_id)?;
     let expected = (
         moved_before["x"].as_f64().unwrap_or_default() + MOVE_X,
         moved_before["y"].as_f64().unwrap_or_default() + MOVE_Y,
     );
-    let moved = element(&back, &moved_id)?;
+    let moved = element(&back, moved_id)?;
     check(
         "moved node read back",
         close(moved["x"].as_f64(), Some(expected.0))
             && close(moved["y"].as_f64(), Some(expected.1)),
     );
-
-    let text_id = report["moved"]["text_id"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    let text_before = element(&before, &text_id)?;
-    let text = element(&back, &text_id)?;
-    check(
-        "bound text followed the node",
-        close(
-            text["x"].as_f64(),
-            text_before["x"].as_f64().map(|x| x + MOVE_X),
-        ) && close(
-            text["y"].as_f64(),
-            text_before["y"].as_f64().map(|y| y + MOVE_Y),
-        ),
-    );
+    check("bound text exists", element(&before, text_id).is_ok());
 
     let mut arrows_kept = true;
+    let mut ends_followed = true;
     let mut groups_kept = true;
     let mut others_kept = true;
     let mut texts_kept = true;
     for (old, new) in before.iter().zip(back.iter()) {
-        let id = old["id"].clone();
+        let id = old["id"].as_str().unwrap_or_default();
+        let shift = |bound: &Value| {
+            if bound["elementId"].as_str() == Some(moved_id) {
+                (MOVE_X, MOVE_Y)
+            } else {
+                (0.0, 0.0)
+            }
+        };
         if old["type"] == "arrow" {
             arrows_kept &= old["startBinding"] == new["startBinding"]
                 && old["endBinding"] == new["endBinding"];
+            let (start_shift, end_shift) = (shift(&old["startBinding"]), shift(&old["endBinding"]));
+            ends_followed &= match (ends(old), ends(new)) {
+                (Some((os, oe)), Some((ns, ne))) => {
+                    close(Some(ns.0), Some(os.0 + start_shift.0))
+                        && close(Some(ns.1), Some(os.1 + start_shift.1))
+                        && close(Some(ne.0), Some(oe.0 + end_shift.0))
+                        && close(Some(ne.1), Some(oe.1 + end_shift.1))
+                }
+                _ => false,
+            };
+        } else {
+            let (dx, dy) = if id == moved_id || id == text_id {
+                (MOVE_X, MOVE_Y)
+            } else {
+                (0.0, 0.0)
+            };
+            others_kept &= close(new["x"].as_f64(), old["x"].as_f64().map(|x| x + dx))
+                && close(new["y"].as_f64(), old["y"].as_f64().map(|y| y + dy))
+                && close(new["width"].as_f64(), old["width"].as_f64())
+                && close(new["height"].as_f64(), old["height"].as_f64());
         }
         if old["type"] == "text" {
             texts_kept &= old["text"] == new["text"]
                 && old["originalText"] == new["originalText"]
                 && old["fontSize"] == new["fontSize"];
         }
-        if old["groupIds"] != new["groupIds"] {
-            groups_kept = false;
-        }
-        if id.as_str() != Some(moved_id.as_str()) && id.as_str() != Some(text_id.as_str()) {
-            others_kept &= close(old["x"].as_f64(), new["x"].as_f64())
-                && close(old["y"].as_f64(), new["y"].as_f64());
-        }
+        groups_kept &= old["groupIds"] == new["groupIds"];
     }
     check("arrow bindings kept", arrows_kept);
+    check("arrow ends followed the node", ends_followed);
     check("text content kept", texts_kept);
     check("group ids kept", groups_kept);
-    check("other nodes unmoved", others_kept);
+    check("nodes and texts at expected positions", others_kept);
     check(
         "png written",
         fs::metadata(&png).map(|m| m.len() > 0).unwrap_or(false),
@@ -275,8 +293,4 @@ fn close(a: Option<f64>, b: Option<f64>) -> bool {
         (Some(a), Some(b)) => (a - b).abs() < TOLERANCE,
         _ => false,
     }
-}
-
-fn canonical(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }

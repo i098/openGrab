@@ -1,9 +1,10 @@
 // Usage: bun run roundtrip.ts <in.bin> <out.bin> <board.png>
 //
-// Loads a Yjs update whose root array "elements" holds Excalidraw elements written by Rust.
-// Restores them with @excalidraw/excalidraw, checks validity and bindings, moves one node,
-// exports a PNG with Excalidraw's own export helper, and writes the full update back.
-// Prints a JSON report on stdout. The Rust bin `board_roundtrip` reads it.
+// Loads a Yjs update whose root map "board" holds an "elements" array of Excalidraw elements
+// written by Rust. Restores them with @excalidraw/excalidraw, moves one node with its text and
+// arrow ends, checks the edited scene, exports it as a PNG with Excalidraw's own export helper,
+// and writes that same scene back into the array. Prints a JSON report on stdout.
+// The Rust bin `board_roundtrip` reads it.
 import { Window } from "happy-dom";
 import { createCanvas } from "@napi-rs/canvas";
 import { Resvg } from "@resvg/resvg-js";
@@ -22,6 +23,8 @@ type El = {
   containerId?: string | null;
   startBinding?: { elementId: string } | null;
   endBinding?: { elementId: string } | null;
+  points?: number[][] | null;
+  isDeleted?: boolean;
 };
 type Binding = { id: string; type: string };
 
@@ -71,7 +74,8 @@ const MOVE = { x: 40, y: 20 };
 
 const ydoc = new Y.Doc();
 Y.applyUpdate(ydoc, new Uint8Array(await Bun.file(inPath).arrayBuffer()));
-const array = ydoc.getArray("elements");
+const array = ydoc.getMap("board").get("elements");
+if (!(array instanceof Y.Array)) throw new Error('map "board" has no "elements" array');
 // The Y.Array holds plain Excalidraw element objects (ContentAny); restore checks their shape.
 const raw = structuredClone(array.toArray()) as El[];
 // restoreElements has no input/output type for a plain array of objects read from Yjs.
@@ -86,18 +90,64 @@ const texts = restored.filter((el) => el.type === "text");
 const checks: Record<string, boolean> = {};
 const reasons: string[] = [];
 
-/** Used six times so every failed check reports one reason line. */
+/** Record one check; a failed check adds one reason line. */
 function check(name: string, ok: boolean, reason: string) {
   checks[name] = ok;
   if (!ok) reasons.push(reason);
 }
 
+const groupIds = [...new Set(restored.flatMap((el) => el.groupIds ?? []))];
+check(
+  "groups",
+  groupIds.length > 0 &&
+    groupIds.every((groupId) => {
+      const members = rects.filter((el) => (el.groupIds ?? []).includes(groupId));
+      if (members.length === 0 || new Set(members.map((m) => m.x)).size !== 1) return false;
+      const top = Math.min(...members.map((m) => m.y));
+      const bottom = Math.max(...members.map((m) => m.y));
+      return !rects.some((r) => !members.includes(r) && r.x === members[0].x && r.y > top && r.y < bottom);
+    }),
+  "a group is empty, or its nodes are not adjacent in one column",
+);
+
+// Move the first node, with its bound text and the ends of its arrows, in the restored scene.
+const node = rects[0];
+const text = texts.find((t) => t.containerId === node.id);
+if (!text) throw new Error(`node ${node.id} has no bound text`);
+for (const el of [node, text]) {
+  el.x += MOVE.x;
+  el.y += MOVE.y;
+}
+for (const arrow of arrows) {
+  const points = arrow.points ?? [];
+  if (arrow.startBinding?.elementId === node.id) {
+    arrow.x += MOVE.x;
+    arrow.y += MOVE.y;
+    for (const point of points.slice(1)) {
+      point[0] -= MOVE.x;
+      point[1] -= MOVE.y;
+    }
+  }
+  if (arrow.endBinding?.elementId === node.id) {
+    points[points.length - 1][0] += MOVE.x;
+    points[points.length - 1][1] += MOVE.y;
+  }
+  const xs = points.map((p) => p[0]);
+  const ys = points.map((p) => p[1]);
+  arrow.width = Math.max(...xs) - Math.min(...xs);
+  arrow.height = Math.max(...ys) - Math.min(...ys);
+}
+
 check(
   "ids",
   restored.length === raw.length &&
-    restored.every((el) => typeof el.id === "string" && el.id.length > 0) &&
-    new Set(restored.map((el) => el.id)).size === restored.length,
-  "restore lost, merged or duplicated an element",
+    restored.every((el, i) => el.id === raw[i].id && el.id.length > 0 && el.type === raw[i].type),
+  "restore lost, merged, reordered or retyped an element",
+);
+check(
+  "visible",
+  restored.every((el) => !el.isDeleted),
+  "restore marked an element deleted",
 );
 check(
   "shapes",
@@ -122,6 +172,25 @@ check(
   "an arrow is not bound to a rectangle both ways",
 );
 
+const EPS = 1e-6;
+const onOutline = (px: number, py: number, r: El | undefined) =>
+  r !== undefined &&
+  px >= r.x - EPS && px <= r.x + r.width + EPS && py >= r.y - EPS && py <= r.y + r.height + EPS &&
+  (Math.abs(px - r.x) < EPS || Math.abs(px - r.x - r.width) < EPS ||
+    Math.abs(py - r.y) < EPS || Math.abs(py - r.y - r.height) < EPS);
+check(
+  "arrowEnds",
+  arrows.every((arrow) => {
+    const points = arrow.points ?? [];
+    if (points.length < 2) return false;
+    const first = points[0];
+    const last = points[points.length - 1];
+    return onOutline(arrow.x + first[0], arrow.y + first[1], map.get(arrow.startBinding?.elementId ?? "")) &&
+      onOutline(arrow.x + last[0], arrow.y + last[1], map.get(arrow.endBinding?.elementId ?? ""));
+  }),
+  "an arrow end is not on the outline of its bound rectangle",
+);
+
 check(
   "textsBound",
   texts.every((text) => {
@@ -142,41 +211,6 @@ check(
   "two node rectangles overlap",
 );
 
-const groupIds = [...new Set(restored.flatMap((el) => el.groupIds ?? []))];
-check(
-  "groups",
-  groupIds.length > 0 &&
-    groupIds.every((groupId) => {
-      const members = rects.filter((el) => (el.groupIds ?? []).includes(groupId));
-      return members.length >= 2 && new Set(members.map((m) => m.x)).size === 1;
-    }),
-  "a group has fewer than two nodes, or its nodes are not in one column",
-);
-
-// Move the first node, with its bound text, inside the Y.Array.
-const node = rects[0];
-const text = texts.find((t) => t.containerId === node.id);
-const moved = {
-  id: node.id,
-  text_id: text?.id,
-  from: { x: node.x, y: node.y },
-  to: { x: node.x + MOVE.x, y: node.y + MOVE.y },
-};
-for (const id of [node.id, text?.id]) {
-  const index = id ? raw.findIndex((el) => el.id === id) : -1;
-  if (index === -1) throw new Error(`element ${id} missing from the Y.Array`);
-  const el = raw[index];
-  array.delete(index, 1);
-  array.insert(index, [{ ...el, x: el.x + MOVE.x, y: el.y + MOVE.y }]);
-}
-
-// Same move on the restored copy, then export with Excalidraw's helper.
-for (const el of restored) {
-  if (el.id === node.id || el.id === text?.id) {
-    el.x += MOVE.x;
-    el.y += MOVE.y;
-  }
-}
 const svg = await exportToSvg({
   elements: restored as unknown as ExcalidrawElement[],
   appState: { exportBackground: true, viewBackgroundColor: "#ffffff" },
@@ -186,6 +220,12 @@ const svg = await exportToSvg({
 const png = new Uint8Array(new Resvg(svg.outerHTML, { fitTo: { mode: "original" } }).render().asPng());
 check("png", png.length > 0 && png[0] === 0x89 && png[1] === 0x50, "PNG export is empty or not a PNG");
 
+// Write the checked scene itself. JSON drops the undefined fields restore leaves behind.
+const edited = JSON.parse(JSON.stringify(restored));
+ydoc.transact(() => {
+  array.delete(0, array.length);
+  array.insert(0, edited);
+});
 await Bun.write(outPath, Y.encodeStateAsUpdate(ydoc));
 await Bun.write(pngPath, png);
 
@@ -193,7 +233,7 @@ const report = {
   ok: Object.values(checks).every(Boolean),
   checks,
   reasons,
-  moved,
+  moved: { id: node.id, text_id: text.id },
   counts: {
     elements: restored.length,
     nodes: rects.length,
