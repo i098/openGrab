@@ -45,7 +45,7 @@ cargo run -p parley-brain --bin doc_say -- --adapter anthropic empty.txt "Parley
 ## Draw a board
 
 `Transcript::write_board(llm, request, &board_doc)` runs the model with one tool, `board_create`: `nodes` (`id`, `label`), `edges` (`from`, `to`, optional `label` of at most 16 characters) and optional `groups` (`id`, `label`, `members`). The model never sends coordinates: `parley_artifacts::board` computes the layout and writes the Excalidraw elements to the `BoardDoc`. It returns the chat line to post (at most 500 characters).
-A rejected call is a `BrainError::BadBoardCall` and the board is unchanged: no call, more than one call, an unknown tool, an empty board, more than 30 nodes, duplicate ids, blank labels, an edge to an unknown node, or a board that already has content (editing is not supported).
+A reply with no tool call is `BrainError::NoToolCall`. Any other rejected call is a `BrainError::BadBoardCall`. In both cases the board is unchanged. Rejected: more than one call, an unknown tool, an empty board, more than 30 nodes, duplicate ids, blank labels, an edge to an unknown node, or a board that already has content (editing is not supported).
 
 `board_say` prints the chat line and the board elements, with the same env variables as `ask_say`:
 
