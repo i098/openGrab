@@ -181,6 +181,19 @@ fn create_output_dir(out: Option<PathBuf>, attached: bool) -> Result<PathBuf> {
     Ok(out)
 }
 
+/// Participants the viewer sees besides the viewer. Meet may mark the viewer's own tile (`is_self`); when it
+/// marks none, one tile is the viewer's, so one is removed from the count.
+fn others_in_view(tiles: &serde_json::Value) -> usize {
+    let tiles = tiles.as_array().map_or(&[][..], Vec::as_slice);
+    let marked = tiles.iter().any(|x| x["is_self"] == true);
+    let non_self = tiles.iter().filter(|x| x["is_self"] != true).count();
+    if marked {
+        non_self
+    } else {
+        non_self.saturating_sub(1)
+    }
+}
+
 fn with_authuser(link: &str, n: Option<u8>) -> String {
     match n {
         Some(n) => {
@@ -385,16 +398,7 @@ async fn main() -> Result<()> {
         } else {
             "participants"
         };
-        let others = snaps.last().map_or(0, |s| {
-            let tiles = s[view].as_array().map_or(&[][..], Vec::as_slice);
-            let marked = tiles.iter().any(|x| x["is_self"] == true);
-            let non_self = tiles.iter().filter(|x| x["is_self"] != true).count();
-            if marked {
-                non_self
-            } else {
-                non_self.saturating_sub(1)
-            }
-        });
+        let others = snaps.last().map_or(0, |s| others_in_view(&s[view]));
         let file = out.join("participants.json");
         std::fs::write(
             &file,
@@ -677,4 +681,40 @@ async fn speakers(
         x.leave().await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tiles(self_flags: &[bool]) -> serde_json::Value {
+        self_flags.iter().map(|s| json!({"is_self": s})).collect()
+    }
+
+    #[test]
+    fn the_unmarked_viewer_tile_is_not_an_outside_participant() {
+        assert_eq!(others_in_view(&tiles(&[false])), 0, "bot alone in the call");
+        assert_eq!(others_in_view(&tiles(&[false, false])), 1);
+    }
+
+    #[test]
+    fn a_marked_viewer_tile_is_removed_once() {
+        assert_eq!(others_in_view(&tiles(&[true])), 0);
+        assert_eq!(others_in_view(&tiles(&[true, false])), 1);
+    }
+
+    #[test]
+    fn authuser_replaces_any_query_and_fragment() {
+        let id = "https://meet.google.com/abc-defg-hij";
+        assert_eq!(with_authuser(id, Some(1)), format!("{id}?authuser=1"));
+        assert_eq!(
+            with_authuser(&format!("{id}?pli=1&authuser=0#x"), Some(1)),
+            format!("{id}?authuser=1")
+        );
+        assert_eq!(
+            with_authuser(&format!("{id}?pli=1"), None),
+            format!("{id}?pli=1")
+        );
+    }
 }

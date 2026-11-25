@@ -119,7 +119,7 @@ Findings that the run needed code changes for:
 - The host and the bot can have the same display name, so the page script no longer skips a message only because the sender name equals its own name. It skips the lines the driver posted itself and Meet's "You".
 - The host of a guest flagged "With potential risks" sees only "Deny" and a "More actions" menu. The menu item "Admit entry" admits the guest. For a normal guest the host sees the "N guest waiting" button, then an "Admit" button.
 - The driver opens each attached tab in a new window. A background tab in the same window is hidden, and Meet shows no waiting-guest controls to a hidden host tab.
-- Meet does not mark the viewer's own tile. In the host view the Outsider check counts every tile and subtracts the host.
+- Meet may not mark the viewer's own tile. The Outsider check reads the host view (the bot view without a host tab) and subtracts one tile (the viewer) only when no tile is marked as the viewer's own.
 
 ## F7. Speakers-in-call: gap
 

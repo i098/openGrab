@@ -29,7 +29,7 @@ To use `--out`, give a new directory path under an existing parent that you trus
 
     scripts/p0-exit.sh <meet-link> --attach 9523 --checks join
 
-Two accounts in one browser: add `--host-authuser 0 --bot-authuser 1` (Google account indexes) and the exit test
+Two accounts in one browser: add `--host-authuser 0 --bot-authuser 1` (Google account indexes; the driver drops any query or fragment from the link and adds `?authuser=N`) and the exit test
 opens a second window as the host, admits the bot, and checks chat in both directions:
 
     scripts/p0-exit.sh <meet-link> --attach 9523 --checks join,chat,tile,outsider --host-authuser 0 --bot-authuser 1

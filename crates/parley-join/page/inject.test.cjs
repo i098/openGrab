@@ -8,7 +8,7 @@ const script = new vm.Script(fs.readFileSync(`${__dirname}/inject.js`, 'utf8'));
 
 function meetPage({
   buttons, elements = {}, attached = false, name = 'Test',
-  window = new EventTarget(), tick = () => {}, send = () => {},
+  window = new EventTarget(), tick = () => {}, send = () => {}, socketState = 1, globals = {},
 }) {
   window.__PARLEY_CFG = { ws: 'ws://localhost', role: 'bot', name, attached, selectors };
   window.top = window;
@@ -27,10 +27,11 @@ function meetPage({
     },
     navigator: {},
     WebSocket: class {
-      readyState = 1;
+      readyState = socketState;
       send = send;
     },
     setInterval: tick,
+    ...globals,
   });
   return window.__parley;
 }
@@ -115,4 +116,48 @@ test('attached chat reads the host even when the host shares the tile label', ()
   scan();
   assert.deepEqual(received, [['Sam', 'Host question']]);
   assert.equal(page.chatCount('Bot reply'), 1);
+});
+
+test('attached mode with no open socket keeps chat and roster text queued under a flood of audio frames', () => {
+  const window = new EventTarget();
+  const peers = [];
+  window.RTCPeerConnection = class {
+    listeners = {};
+    constructor() { peers.push(this); }
+    addEventListener(type, fn) { this.listeners[type] = fn; }
+  };
+  let port;
+  const ticks = [];
+  const noop = () => {};
+  const page = meetPage({
+    buttons: [],
+    attached: true,
+    window,
+    socketState: 0,
+    tick: (fn) => ticks.push(fn),
+    globals: {
+      Audio: class { play() { return Promise.resolve(); } },
+      MediaStream: class {},
+      Blob: class {},
+      URL: { createObjectURL: () => 'blob:x', revokeObjectURL: noop },
+      AudioContext: class {
+        resume() { return Promise.resolve(); }
+        createMediaStreamSource() { return { connect: noop }; }
+        audioWorklet = { addModule: () => Promise.resolve() };
+        destination = {};
+      },
+      AudioWorkletNode: class { constructor() { port = this.port = {}; } connect() {} },
+    },
+  });
+  new window.RTCPeerConnection(); // the page hooks this constructor
+  const track = { kind: 'audio', id: 't1', label: 'remote' };
+  peers[0].listeners.track({ track, streams: [{ id: 's1' }] });
+  return new Promise((resolve) => setImmediate(resolve)).then(() => {
+    assert.ok(port, 'the remote audio track was tapped');
+    for (let i = 0; i < 600; i++) port.onmessage({ data: new Float32Array(4) }); // 600 frames > the 500 queue limit
+    ticks.forEach((fn) => fn()); // the roster interval reports its first (empty) roster as text
+    const texts = page.takeQueue().map((m) => JSON.parse(m).t);
+    assert.ok(texts.includes('track'));
+    assert.ok(texts.includes('roster'), 'a text message sent after the audio flood is still queued');
+  });
 });
