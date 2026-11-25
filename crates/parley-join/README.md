@@ -17,7 +17,8 @@ The driver closes its own tab on leave, setup failure, or drop.
 It does not close the browser or other tabs.
 The attached bot ignores `--profile` and does not need a local Chromium binary or display.
 The speakers still start their own Chromium.
-Attach mode does not take tab screenshots or record URLs or text from pages outside Meet.
+Attach mode does not record URLs or text from pages outside Meet.
+It saves a screenshot only if the same Meet document remains active through capture.
 
     scripts/p0-exit.sh <meet-link> --attach 9523 --checks join
 

@@ -488,12 +488,25 @@ impl Session {
     }
 
     pub async fn screenshot(&self, path: &Path) -> Result<bool> {
-        if self.attached() {
-            return Ok(false);
-        }
-        let r = self
+        const SCREENSHOT_DOCUMENT: &str = "window.__parley?.screenshotDocument() ?? null";
+        let document = if self.attached() {
+            let Some(id) = self.eval::<Option<String>>(SCREENSHOT_DOCUMENT).await? else {
+                return Ok(false);
+            };
+            Some(id)
+        } else {
+            None
+        };
+        let capture = self
             .cmd("Page.captureScreenshot", json!({"format": "png"}))
-            .await?;
+            .await;
+        if let Some(before) = document {
+            let after: Option<String> = self.eval(SCREENSHOT_DOCUMENT).await?;
+            if after.as_ref() != Some(&before) {
+                return Ok(false);
+            }
+        }
+        let r = capture?;
         std::fs::write(path, decode_base64(r["data"].as_str().unwrap_or_default())?)?;
         Ok(true)
     }
@@ -785,8 +798,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn signed_in_lobby_clicks_join_now_without_entering_a_name() {
+    async fn mock_attached_session(
+        mut respond: impl FnMut(&super::Value) -> super::Value + Send + 'static,
+    ) -> (super::Session, super::JoinHandle<()>) {
         use super::*;
         use futures_util::SinkExt;
 
@@ -795,49 +809,17 @@ mod tests {
         let browser = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-            let mut joined = false;
             while let Some(Ok(Message::Text(text))) = ws.next().await {
                 let request: Value = serde_json::from_str(&text).unwrap();
-                let params = &request["params"];
-                let result = match request["method"].as_str().unwrap() {
-                    "Page.navigate" => json!({}),
-                    "Runtime.evaluate" => {
-                        let expression = params["expression"].as_str().unwrap();
-                        let value = if expression.contains("__parley.state()") {
-                            if joined {
-                                json!({"phase": "in_call"})
-                            } else {
-                                json!({"phase": "prejoin", "can_join": true})
-                            }
-                        } else if expression.contains("__parley.media()") {
-                            json!({"mic": false, "cam": true})
-                        } else if expression.contains("__parley.point('join')") {
-                            json!({"x": 30, "y": 35})
-                        } else {
-                            panic!("unexpected evaluation: {expression}");
-                        };
-                        json!({"result": {"value": value}})
-                    }
-                    "Input.dispatchMouseEvent" => {
-                        assert_eq!(params["x"], 30.0);
-                        assert_eq!(params["y"], 35.0);
-                        if params["type"] == "mouseReleased" {
-                            assert!(!joined);
-                            joined = true;
-                        }
-                        json!({})
-                    }
-                    method => panic!("unexpected browser command: {method}"),
-                };
+                let result = respond(&request);
                 ws.send(Message::text(
                     json!({"id": request["id"], "result": result}).to_string(),
                 ))
                 .await
                 .unwrap();
             }
-            joined
         });
-        let mut session = Session {
+        let session = Session {
             cdp: Cdp::connect(&format!("ws://127.0.0.1:{port}"))
                 .await
                 .unwrap(),
@@ -852,6 +834,62 @@ mod tests {
             tasks: Vec::new(),
             owned_target: None,
         };
+        (session, browser)
+    }
+
+    #[tokio::test]
+    async fn signed_in_lobby_clicks_join_now_without_entering_a_name() {
+        use super::*;
+
+        let mut pressed = false;
+        let mut joined = false;
+        let (mut session, browser) = mock_attached_session(move |request| {
+            let params = &request["params"];
+            match request["method"].as_str().unwrap() {
+                "Page.navigate" => json!({}),
+                "Runtime.evaluate" => {
+                    let expression = params["expression"].as_str().unwrap();
+                    let value = if expression.contains("__parley.state()") {
+                        if joined {
+                            json!({"phase": "in_call"})
+                        } else {
+                            json!({"phase": "prejoin", "can_join": true})
+                        }
+                    } else if expression.contains("__parley.media()") {
+                        json!({"mic": false, "cam": true})
+                    } else if expression.contains("__parley.point('join')") {
+                        json!({"x": 30, "y": 35})
+                    } else {
+                        panic!("unexpected evaluation: {expression}");
+                    };
+                    json!({"result": {"value": value}})
+                }
+                "Input.dispatchMouseEvent" => {
+                    assert_eq!(params["x"], 30.0);
+                    assert_eq!(params["y"], 35.0);
+                    match params["type"].as_str().unwrap() {
+                        "mouseMoved" => {}
+                        "mousePressed" => {
+                            assert!(!pressed && !joined);
+                            assert_eq!(params["button"], "left");
+                            assert_eq!(params["buttons"], 1);
+                            pressed = true;
+                        }
+                        "mouseReleased" => {
+                            assert!(pressed && !joined);
+                            assert_eq!(params["button"], "left");
+                            assert_eq!(params["buttons"], 0);
+                            pressed = false;
+                            joined = true;
+                        }
+                        kind => panic!("unexpected mouse event: {kind}"),
+                    }
+                    json!({})
+                }
+                method => panic!("unexpected browser command: {method}"),
+            }
+        })
+        .await;
         let report = session
             .join(
                 "https://meet.google.com/abc-defg-hij",
@@ -861,7 +899,49 @@ mod tests {
             .unwrap();
         assert_eq!(report.outcome, Outcome::Admitted);
         drop(session);
-        assert!(browser.await.unwrap());
+        browser.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn attached_screenshot_is_saved_only_for_an_unchanged_meet_document() {
+        use super::*;
+
+        let root =
+            std::env::temp_dir().join(format!("parley-screenshot-{}", random_token().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        for (index, (before, after, saved)) in [
+            (None, None, false),
+            (Some("meet-a"), None, false),
+            (Some("meet-a"), Some("meet-b"), false),
+            (Some("meet-a"), Some("meet-a"), true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut active = before;
+            let (session, browser) = mock_attached_session(move |request| {
+                match request["method"].as_str().unwrap() {
+                    "Runtime.evaluate" => json!({"result": {"value": active}}),
+                    "Page.captureScreenshot" => {
+                        assert!(active.is_some(), "off-site screenshot requested");
+                        active = after;
+                        json!({"data": "iVBORw0KGgo="})
+                    }
+                    method => panic!("unexpected browser command: {method}"),
+                }
+            })
+            .await;
+            let path = root.join(format!("{index}.png"));
+            assert_eq!(session.screenshot(&path).await.unwrap(), saved);
+            if saved {
+                assert_eq!(std::fs::read(path).unwrap(), b"\x89PNG\r\n\x1a\n");
+            } else {
+                assert!(!path.exists());
+            }
+            drop(session);
+            browser.await.unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

@@ -297,9 +297,17 @@ registerProcessor("parley-pcm",P)`;
     return /^turn off/i.test(btn.getAttribute("aria-label") || "");
   };
   const chatLines = () => chatNodes().map((n) => textOf(q1(S.chatText, n) || n));
+  let screenshotDocument;
 
   window.__parley = {
     state: pageState,
+    screenshotDocument: () => {
+      if (!screenshotDocument) {
+        screenshotDocument = crypto.randomUUID();
+        window.addEventListener("pagehide", () => { screenshotDocument = null; }, { capture: true, once: true });
+      }
+      return screenshotDocument;
+    },
     // The driver clicks these points with real CDP mouse events; Meet ignores script clicks on some controls.
     point: (kind) => {
       const el = {

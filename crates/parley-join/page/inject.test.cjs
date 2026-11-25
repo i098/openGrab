@@ -1,17 +1,17 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { webcrypto } = require('node:crypto');
 const { test } = require('node:test');
 const vm = require('node:vm');
 const selectors = require('./selectors.json');
 const script = new vm.Script(fs.readFileSync(`${__dirname}/inject.js`, 'utf8'));
 
-function meetPage({ buttons, elements = {} }) {
-  const window = {
-    __PARLEY_CFG: { ws: 'ws://localhost', role: 'bot', name: 'Test', selectors },
-  };
+function meetPage({ buttons, elements = {}, window = new EventTarget() }) {
+  window.__PARLEY_CFG = { ws: 'ws://localhost', role: 'bot', name: 'Test', selectors };
   window.top = window;
   script.runInNewContext({
     window,
+    crypto: webcrypto,
     location: { hostname: 'meet.google.com', href: 'https://meet.google.com/abc-defg-hij' },
     document: {
       body: { innerText: '' },
@@ -56,4 +56,17 @@ test('the participant tile and Leave call control identify direct entry', () => 
   });
   assert.equal(page.state().phase, 'in_call');
   assert.equal(page.point('join'), null);
+});
+
+test('leaving and returning to a Meet document invalidates an active capture', () => {
+  const window = new EventTarget();
+  const page = meetPage({ buttons: [], window });
+  const before = page.screenshotDocument();
+  assert.equal(page.screenshotDocument(), before);
+
+  window.dispatchEvent(new Event('pagehide'));
+
+  const after = page.screenshotDocument();
+  assert.notEqual(after, before);
+  assert.equal(page.screenshotDocument(), after);
 });
