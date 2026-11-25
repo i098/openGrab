@@ -43,6 +43,8 @@ pub struct Opts {
     pub role: Role,
     /// Keep the profile after the browser exits.
     pub persistent_profile: bool,
+    /// Attach to a running browser that has this remote-debugging port, instead of starting Chromium.
+    pub attach: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -121,19 +123,21 @@ pub struct PageState {
 #[derive(Debug, Clone, Serialize)]
 pub struct JoinReport {
     pub outcome: Outcome,
-    /// Time from the click on "Ask to join" to admission (or to the end state).
+    /// Time from the click on "Ask to join" to the end state. With no click, from the start of the join.
     pub waited_ms: u128,
     pub last_state: PageState,
 }
 
 pub struct Session {
     cdp: Cdp,
-    child: tokio::process::Child,
+    child: Option<tokio::process::Child>,
     /// CDP session id of the one tab.
     tab: String,
     opts: Opts,
     events: mpsc::UnboundedReceiver<CallEvent>,
     tasks: Vec<JoinHandle<()>>,
+    /// The tab this driver opened in an attached browser. Closed on drop; the browser stays open.
+    owned_target: Option<String>,
 }
 
 impl Session {
@@ -187,39 +191,49 @@ impl Session {
             &opts.profile,
             std::os::unix::fs::PermissionsExt::from_mode(0o700),
         )?;
-        let port = free_port()?;
+        let port = opts.attach.map_or_else(free_port, Ok)?;
         // A fixed port, not 0: Chromium treats port 0 as automation mode and sets `navigator.webdriver` to true.
         // No `--enable-automation`, no stealth flags: a plain Chromium with a window and fake media devices.
-        let mut child = tokio::process::Command::new(&opts.chrome)
-            .arg(format!("--user-data-dir={}", opts.profile.display()))
-            .arg(format!("--remote-debugging-port={port}"))
-            .arg("--window-size=1280,800")
-            .args(["--no-first-run", "--no-default-browser-check"])
-            .args(&args)
-            .arg("about:blank")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .context("launching Chromium")?;
+        // With `attach`, the browser is already running (for example the fleet voxl tier) and is not started here.
+        let mut child = match opts.attach {
+            Some(_) => None,
+            None => Some(
+                tokio::process::Command::new(&opts.chrome)
+                    .arg(format!("--user-data-dir={}", opts.profile.display()))
+                    .arg(format!("--remote-debugging-port={port}"))
+                    .arg("--window-size=1280,800")
+                    .args(["--no-first-run", "--no-default-browser-check"])
+                    .args(&args)
+                    .arg("about:blank")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .context("launching Chromium")?,
+            ),
+        };
         let ws_path = cdp::browser_socket(port, Duration::from_secs(120)).await?;
         let cdp = Cdp::connect(&ws_path).await?;
-        let targets = cdp.call(None, "Target.getTargets", json!({})).await?;
-        let target = targets["targetInfos"]
-            .as_array()
-            .and_then(|t| t.iter().find(|t| t["type"] == "page"))
-            .context("the first tab is missing")?["targetId"]
-            .clone();
-        let tab = cdp
-            .call(
-                None,
-                "Target.attachToTarget",
-                json!({"targetId": target, "flatten": true}),
-            )
-            .await?["sessionId"]
-            .as_str()
-            .context("no session id for the tab")?
-            .to_string();
+        // Attach: the user's browser has its own tabs, so the driver opens a new one. Never the first page target.
+        let (tab, owned_target) = if opts.attach.is_some() {
+            let id = cdp
+                .call(None, "Target.createTarget", json!({"url": "about:blank"}))
+                .await?["targetId"]
+                .as_str()
+                .context("no target id for the new tab")?
+                .to_string();
+            (attach_tab(&cdp, &id).await?, Some(id))
+        } else {
+            let targets = cdp.call(None, "Target.getTargets", json!({})).await?;
+            let target = targets["targetInfos"]
+                .as_array()
+                .and_then(|t| t.iter().find(|t| t["type"] == "page"))
+                .context("the first tab is missing")?["targetId"]
+                .as_str()
+                .context("the first tab has no target id")?
+                .to_string();
+            (attach_tab(&cdp, &target).await?, None)
+        };
         let headed: Result<()> = async {
             let ua = cdp
                 .call(
@@ -246,25 +260,37 @@ impl Session {
             Ok(())
         }
         .await;
-        if let Err(e) = headed {
-            let _ = child.kill().await;
+        let configured: Result<()> = async {
+            headed?;
+            let cfg_js = serde_json::json!({
+                "ws": ws_url,
+                "role": if matches!(opts.role, Role::Bot) { "bot" } else { "speaker" },
+                "name": opts.name,
+                "selectors": selectors::load()?,
+            });
+            // Without `Page.enable` the new-document script did not run in this setup.
+            cdp.call(Some(&tab), "Page.enable", json!({})).await?;
+            let source = format!("window.__PARLEY_CFG = {cfg_js};\n{INJECT_JS}");
+            cdp.call(
+                Some(&tab),
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({"source": source}),
+            )
+            .await?;
+            Ok(())
+        }
+        .await;
+        if let Err(e) = configured {
+            if let Some(c) = child.as_mut() {
+                let _ = c.kill().await;
+            }
+            if let Some(id) = &owned_target {
+                let _ = cdp
+                    .call(None, "Target.closeTarget", json!({"targetId": id}))
+                    .await;
+            }
             return Err(e);
         }
-        let cfg_js = serde_json::json!({
-            "ws": ws_url,
-            "role": if matches!(opts.role, Role::Bot) { "bot" } else { "speaker" },
-            "name": opts.name,
-            "selectors": selectors::load()?,
-        });
-        // Without `Page.enable` the new-document script did not run in this setup.
-        cdp.call(Some(&tab), "Page.enable", json!({})).await?;
-        let source = format!("window.__PARLEY_CFG = {cfg_js};\n{INJECT_JS}");
-        cdp.call(
-            Some(&tab),
-            "Page.addScriptToEvaluateOnNewDocument",
-            json!({"source": source}),
-        )
-        .await?;
         Ok(Self {
             cdp,
             child,
@@ -272,6 +298,7 @@ impl Session {
             opts,
             events,
             tasks,
+            owned_target,
         })
     }
 
@@ -312,31 +339,26 @@ impl Session {
                 break Outcome::Timeout;
             }
             state = self.state().await;
-            match state.phase.as_str() {
-                "in_call" => break Outcome::Admitted,
-                "denied" => break Outcome::Denied,
-                "refused" => break Outcome::Refused,
-                "expired" => break Outcome::Expired,
-                "not_found" => break Outcome::NotFound,
-                "offsite" => break Outcome::Offsite,
-                "prejoin" => {
-                    if !named {
-                        // A signed-in profile has no name field: its join button is already enabled.
-                        named = self.enter_name().await.is_ok() || state.can_join;
-                        self.set_media(false, matches!(self.opts.role, Role::Bot))
-                            .await?;
-                    } else if state.can_join
-                        && clicked.is_none_or(|t| t.elapsed() > Duration::from_secs(20))
-                    {
-                        self.click("join").await?;
-                        clicked = Some(Instant::now());
-                    }
+            if let Some(outcome) = terminal_outcome(&state.phase) {
+                break outcome;
+            }
+            if state.phase == "prejoin" {
+                if !named {
+                    // A signed-in profile has no name field: its join button is already enabled.
+                    named = self.enter_name().await.is_ok() || state.can_join;
+                    self.set_media(false, matches!(self.opts.role, Role::Bot))
+                        .await?;
+                } else if state.can_join
+                    && clicked.is_none_or(|t| t.elapsed() > Duration::from_secs(20))
+                {
+                    self.click("join").await?;
+                    clicked = Some(Instant::now());
                 }
-                _ => {}
             }
             tokio::time::sleep(Duration::from_millis(700)).await;
         };
-        let waited_ms = clicked.map_or(0, |t| t.elapsed().as_millis());
+        // With no click, the wait ran from the start of the join: report that, not zero.
+        let waited_ms = clicked.unwrap_or(start).elapsed().as_millis();
         Ok(JoinReport {
             outcome,
             waited_ms,
@@ -497,20 +519,35 @@ impl Session {
 
     pub async fn leave(mut self) -> Result<()> {
         let _ = self.click("leave").await;
-        let _ = self.cdp.call(None, "Browser.close", json!({})).await;
-        let _ = self.child.wait().await;
+        // Attached: close only the tab this driver opened. The browser itself is not ours to close.
+        match self.owned_target.take() {
+            Some(id) => {
+                let _ = self
+                    .cdp
+                    .call(None, "Target.closeTarget", json!({"targetId": id}))
+                    .await;
+            }
+            None => {
+                let _ = self.cdp.call(None, "Browser.close", json!({})).await;
+            }
+        }
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.wait().await;
+        }
         Ok(())
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
-        for _ in 0..40 {
-            if !matches!(self.child.try_wait(), Ok(None)) {
-                break;
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+            for _ in 0..40 {
+                if !matches!(child.try_wait(), Ok(None)) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
             }
-            std::thread::sleep(Duration::from_millis(50));
         }
         for t in &self.tasks {
             t.abort();
@@ -533,11 +570,38 @@ struct Media {
     cam: Option<bool>,
 }
 
+/// Attach to a tab by target id and return its CDP session id.
+async fn attach_tab(cdp: &Cdp, target: &str) -> Result<String> {
+    Ok(cdp
+        .call(
+            None,
+            "Target.attachToTarget",
+            json!({"targetId": target, "flatten": true}),
+        )
+        .await?["sessionId"]
+        .as_str()
+        .context("no session id for the tab")?
+        .to_string())
+}
+
 /// A port the kernel just handed out; Chromium binds it a moment later.
 fn free_port() -> Result<u16> {
     Ok(std::net::TcpListener::bind("127.0.0.1:0")?
         .local_addr()?
         .port())
+}
+
+/// The outcome a page phase ends the join with, or None while the join keeps waiting.
+fn terminal_outcome(phase: &str) -> Option<Outcome> {
+    Some(match phase {
+        "in_call" => Outcome::Admitted,
+        "denied" => Outcome::Denied,
+        "refused" => Outcome::Refused,
+        "expired" => Outcome::Expired,
+        "not_found" => Outcome::NotFound,
+        "offsite" => Outcome::Offsite,
+        _ => return None,
+    })
 }
 
 /// 16 random bytes as hex from the kernel; the page must present it to reach the WebSocket.
@@ -606,6 +670,21 @@ async fn serve(listener: TcpListener, token: String, tx: mpsc::UnboundedSender<C
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_outcome_ends_only_on_end_phases() {
+        assert_eq!(
+            super::terminal_outcome("in_call"),
+            Some(super::Outcome::Admitted)
+        );
+        assert_eq!(
+            super::terminal_outcome("offsite"),
+            Some(super::Outcome::Offsite)
+        );
+        // A signed-in join passes the prejoin and the loading phases on its way to the call.
+        for phase in ["prejoin", "loading", "waiting", ""] {
+            assert_eq!(super::terminal_outcome(phase), None, "phase {phase:?}");
+        }
+    }
     #[tokio::test]
     async fn failed_launch_keeps_persistent_profile_and_removes_temporary_profile() {
         if std::env::var_os("PARLEY_PROFILE_TEST_CHILD").is_none() {
@@ -636,6 +715,7 @@ mod tests {
                 name: "test".into(),
                 role: super::Role::Bot,
                 persistent_profile,
+                attach: None,
             })
             .await;
             assert!(result.is_err());

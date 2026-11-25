@@ -9,6 +9,16 @@ Sign in locally in that profile before running the checks. The driver keeps it a
 Without this option, the driver deletes its temporary profile when it exits.
 Google cookie import is not supported.
 
+## Attach to a running browser
+
+`--attach <port>` joins with a Chromium that already runs with `--remote-debugging-port=<port>`, for example a signed-in headed browser.
+The driver does not start a browser and never closes it. It opens its own new tab, leaves the other tabs alone, and closes its tab when the join ends with `leave`. If the driver fails before `leave`, its tab stays open: close it by hand.
+`--profile` is not used with `--attach`. Only the bot joins attached. Speakers still start their own Chromium.
+
+    scripts/p0-exit.sh <meet-link> --attach 9523 --checks join
+
+The attached tab runs in the browser's own profile. Do not use it with a second person's private session.
+
 ## Pinned Chromium
 
 - Build: Google Chrome for Testing **157.0.8103.78** (linux64).

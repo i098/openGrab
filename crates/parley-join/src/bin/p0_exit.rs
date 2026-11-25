@@ -31,6 +31,9 @@ struct Args {
     /// Persistent bot profile outside the repository. Sign in once before running the checks.
     #[arg(long)]
     profile: Option<PathBuf>,
+    /// Attach the bot to a running Chromium with this remote-debugging port. It opens its own tab and never closes the browser.
+    #[arg(long)]
+    attach: Option<u16>,
     #[arg(long, default_value_t = 10)]
     chat_count: u32,
     #[arg(long, default_value_t = 600)]
@@ -121,6 +124,11 @@ fn find_chrome() -> Result<PathBuf> {
 /// The bot uses `--profile` instead when given; it stays where the operator put it.
 fn launch_opts(a: &Args, chrome: &Path, tag: &str, name: &str, role: Role) -> Opts {
     let persistent_profile = matches!(role, Role::Bot) && a.profile.is_some();
+    let attach = if matches!(role, Role::Bot) {
+        a.attach
+    } else {
+        None
+    };
     Opts {
         chrome: chrome.into(),
         profile: if matches!(role, Role::Bot) {
@@ -131,6 +139,7 @@ fn launch_opts(a: &Args, chrome: &Path, tag: &str, name: &str, role: Role) -> Op
         name: name.into(),
         role,
         persistent_profile,
+        attach,
     }
 }
 
