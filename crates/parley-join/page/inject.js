@@ -50,7 +50,7 @@
   };
   const send = (m) => {
     if (ws && ws.readyState === 1) ws.send(m);
-    else if (queue.length < 500) queue.push(m);
+    else if (queue.length < 500 && (!CFG.attached || typeof m === "string")) queue.push(m);
   };
   const sendJson = (o) => send(JSON.stringify(o));
   const log = (msg) => sendJson({ t: "log", msg: String(msg) });

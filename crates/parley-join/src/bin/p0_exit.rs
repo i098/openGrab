@@ -183,7 +183,10 @@ fn create_output_dir(out: Option<PathBuf>, attached: bool) -> Result<PathBuf> {
 
 fn with_authuser(link: &str, n: Option<u8>) -> String {
     match n {
-        Some(n) => format!("{link}?authuser={n}"),
+        Some(n) => {
+            let base = link.split(['?', '#']).next().unwrap_or(link);
+            format!("{base}?authuser={n}")
+        }
         None => link.to_owned(),
     }
 }
@@ -383,16 +386,15 @@ async fn main() -> Result<()> {
             "participants"
         };
         let others = snaps.last().map_or(0, |s| {
-            s[view]
-                .as_array()
-                .map_or(0, |p| p.iter().filter(|x| x["is_self"] == false).count())
+            let tiles = s[view].as_array().map_or(&[][..], Vec::as_slice);
+            let marked = tiles.iter().any(|x| x["is_self"] == true);
+            let non_self = tiles.iter().filter(|x| x["is_self"] != true).count();
+            if marked {
+                non_self
+            } else {
+                non_self.saturating_sub(1)
+            }
         });
-        // Meet no longer marks the viewer's own tile, so the host view counts the host tile too.
-        let others = if host.is_some() {
-            others.saturating_sub(1)
-        } else {
-            others
-        };
         let file = out.join("participants.json");
         std::fs::write(
             &file,
