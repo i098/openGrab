@@ -9,9 +9,10 @@ The `parley` binary. It joins a Google Meet call and connects the parts of the p
   - a recap or summary request gets the recap in the Meet chat;
   - a request that starts with a writing verb ("start a doc for the launch plan", "add an agenda") changes the live doc through `Meeting::request`, and the chat line carries the page link;
   - anything else is a question, answered from the transcript in the Meet chat.
+- A transcript segment that starts with the wake name is the same request, answered in the Meet chat through the same path. It is not added to the transcript. Three spoken controls follow the wake name: "pause", "resume" and "leave" (the control word comes first, in a short request: "leave out the budget" is a question). They change the same state as the page buttons: pause and resume update the page and the bot tile, and leave posts the goodbye line, deletes the notes and leaves the call. While paused only "resume" counts; other spoken requests are ignored.
 - Pause, resume and remove on the page stop and start the transcript (the bot tile shows `paused` or `listening`). Remove makes the bot post a goodbye line and leave. Ctrl-C leaves too.
 
-Not here: voice wake word, calendar, sign-in for the page, storage, board requests.
+Not here: spoken answers, calendar, sign-in for the page, storage, board requests.
 
 ## Run
 
@@ -44,23 +45,29 @@ The model comes from `PARLEY_LLM` (`openai` or `anthropic`) and the `parley-llm`
 ## Limits
 
 - Speaker names: a line gets the name of the one person whom Meet showed as speaking in the last 8 seconds, else `Speaker`.
-- One model call at a time. A request that arrives while paused is ignored.
+- One model call at a time. A chat request that arrives while paused is ignored.
+- While paused the speech model keeps running so that it hears "resume". It keeps nothing else: no line reaches the page, and only a wake-name request counts.
+- A spoken request depends on the speech model: a wake name that it writes differently ("Parlay") is not a request.
 - The bot does not notice that the call ended by itself: stop it with Remove or Ctrl-C.
 - Attach mode reads audio and chat by polling the page every 0.5 s.
 
 ## Live check
 
 `live_check` runs the whole product on a real call with two signed-in accounts in one browser (the setup of `p0_exit --host-authuser`).
-It opens the host tab, starts `parley`, admits it, and prints one `PASS` or `FAIL` line each for the notice, a transcript line from audio, a chat answer, a live doc change in an open page tab, and Remove.
+It opens the host tab, starts `parley`, admits it, and prints one `PASS` or `FAIL` line each for the notice, a transcript line from audio, a chat answer, a live doc change in an open page tab, a spoken request, a spoken recap, spoken pause, spoken resume and spoken leave (page state, bot tile, goodbye line, exit status). It prints how long the chat answer took after the end of speech for the spoken request and the spoken recap, and after the chat post for the chat request (each within about 1 s: it polls the chat). The page Remove button is not part of this run.
 The host plays a recorded WAV into the call: attach mode has no fake microphone, so the page script plays the file into the host's silent microphone track.
 
 ```sh
 espeak-ng -w /tmp/say.raw.wav "The launch is on the first of March. Tom will send the budget deck by Friday."
 ffmpeg -y -i /tmp/say.raw.wav -ar 16000 -ac 1 -c:a pcm_s16le /tmp/say.wav
+mkdir -p /tmp/voice
+for f in "request:Parley, when is the launch?" "recap:Parley, recap." "pause:Parley, pause." "resume:Parley, resume." "leave:Parley, leave the call."; do
+  espeak-ng -w /tmp/voice/raw.wav "${f#*:}" && ffmpeg -y -i /tmp/voice/raw.wav -ar 16000 -ac 1 -c:a pcm_s16le "/tmp/voice/${f%%:*}.wav"
+done
 cargo build --release -p parley-bot
-target/release/live_check 'https://meet.google.com/abc-defg-hij' --attach 9523 --host-authuser 0 --bot-authuser 1 --say /tmp/say.wav --keyword march
+target/release/live_check 'https://meet.google.com/abc-defg-hij' --attach 9523 --host-authuser 0 --bot-authuser 1 --say /tmp/say.wav --voice-dir /tmp/voice --keyword march
 ```
 
 ## Test
 
-`cargo test -p parley-bot -p parley-brain` checks the speaker choice and the request classes. The call itself needs the live check.
+`cargo test -p parley-bot -p parley-brain` checks the speaker choice, the request classes and the spoken controls. The call itself needs the live check.
