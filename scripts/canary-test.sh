@@ -41,7 +41,8 @@ expect() {
 }
 
 stamp='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
-pass_out='PASS join: 1 of 1 joins reached the call\nPASS chat: 10 lines read\nPASS tile: both states\nPASS outsider: 3 snapshots\n'
+# The driver's real labels: the outsider check prints as outsider-input.
+pass_out='PASS join: 1 of 1 joins reached the call\nPASS chat: 10 lines read\nPASS tile: both states\nPASS outsider-input: 1 other participant\n'
 
 run "$pass_out" 0 ""
 expect "pass exits 0" "rc=$rc" test "$rc" -eq 0
@@ -49,14 +50,19 @@ expect "pass line" "$(cat "$work/last")" grep -Eq "^PASS $stamp checks=join,chat
 expect "pass runs the four checks on the attached port" "$(cat "$work/args")" grep -qxF -- join,chat,tile,outsider "$work/args"
 expect "pass sends no alert" "alert ran" test ! -e "$work/alerts"
 
-run "PASS join: ok\nFAIL chat: 3 of 10 lines read\nPASS tile: ok\nPASS outsider: ok\n" 1 ""
+run "PASS join: ok\nFAIL chat: 3 of 10 lines read\nPASS tile: ok\nPASS outsider-input: ok\n" 1 ""
 expect "failed check exits 1" "rc=$rc" test "$rc" -eq 1
 expect "failed check names the check" "$(cat "$work/last")" grep -Eq "^FAIL $stamp failed=chat exit=1 " "$work/last"
 expect "failed check runs the alert with the line" "$(cat "$work/alerts" 2>/dev/null)" cmp -s "$work/last" "$work/alerts"
 
+run "PASS join: ok\nPASS chat: ok\nPASS tile: ok\n" 0 ""
+expect "exit 0 without the outsider check is a FAIL" "$(cat "$work/last")" \
+    grep -Eq "^FAIL $stamp failed=run exit=0 " "$work/last"
+
 run "" 1 "Error: no Chromium answers on CDP port 9523 https://meet.google.com/abc-defg-hij me@example.com"
 expect "run error is a FAIL with a reason" "$(cat "$work/last")" \
     grep -Fq "failed=run exit=1 reason=Error: no Chromium answers on CDP port 9523 <url> <address> " "$work/last"
+
 run "" 0 "" ""
 expect "missing link is a config FAIL" "$(cat "$work/last")" \
     grep -Fq " failed=config reason=PARLEY_CANARY_LINK is not set" "$work/last"
