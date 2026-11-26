@@ -42,9 +42,10 @@ timeout --kill-after=60 "$limit" "$bin" "$link" --attach "$port" --checks "$chec
     >"$log" 2>&1
 rc=$?
 
-passed=$(sed -n 's/^PASS \([a-z]*\):.*/\1/p' "$log" | sort | paste -sd, -)
-failed=$(sed -n 's/^FAIL \([a-z]*\):.*/\1/p' "$log" | sort | paste -sd, -)
-if [[ $rc == 0 && $passed == chat,join,outsider,tile ]]; then
+# The driver labels the outsider check "outsider-input", not "outsider".
+passed=$(sed -n 's/^PASS \([a-z-]*\):.*/\1/p' "$log" | sort | paste -sd, -)
+failed=$(sed -n 's/^FAIL \([a-z-]*\):.*/\1/p' "$log" | sort | paste -sd, -)
+if [[ $rc == 0 && $passed == chat,join,outsider-input,tile ]]; then
     finish "PASS $stamp checks=$checks evidence=$state/runs/$stamp"
 fi
 if [[ -n $failed ]]; then
