@@ -95,9 +95,9 @@ Install on the host where the signed-in, headed Chromium runs with `--remote-deb
 
 ```sh
 cargo build --release -p parley-join --bin p0_exit
-mkdir -p ~/.config/parley ~/.config/systemd/user
-sed "s|@REPO@|$PWD|" deploy/systemd/parley-canary.service > ~/.config/systemd/user/parley-canary.service
-cp deploy/systemd/parley-canary.timer ~/.config/systemd/user/
+mkdir -p ~/.config/parley ~/.config/systemd/user ~/.local/share/parley/canary
+cp scripts/canary.sh target/release/p0_exit ~/.local/share/parley/canary/
+cp deploy/systemd/parley-canary.service deploy/systemd/parley-canary.timer ~/.config/systemd/user/
 ```
 
 Write `~/.config/parley/canary.env` outside the repository, mode `0600`:
@@ -107,9 +107,10 @@ PARLEY_CANARY_LINK=https://meet.google.com/abc-defg-hij
 PARLEY_CANARY_HOST_AUTHUSER=1
 PARLEY_CANARY_BOT_AUTHUSER=0
 PARLEY_CANARY_ALERT_CMD=/home/you/.config/parley/canary-alert.sh
+PARLEY_CANARY_BIN=/home/you/.local/share/parley/canary/p0_exit
 ```
 
-The alert command is an executable that takes the result line as `$1`. Optional keys: `PARLEY_CANARY_CDP_PORT` (9523), `PARLEY_CANARY_BIN` (`target/release/p0_exit`), `PARLEY_CANARY_TIMEOUT` (seconds, 1800), `PARLEY_CANARY_STATE`.
+The alert command is an executable that takes the result line as `$1`. Optional keys: `PARLEY_CANARY_CDP_PORT` (9523), `PARLEY_CANARY_TIMEOUT` (seconds, 1800), `PARLEY_CANARY_STATE`.
 
 Start the timer and run it once:
 
