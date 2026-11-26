@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the openGrab daily Meet canary
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+Unit=parley-canary.service
+
+[Install]
+WantedBy=timers.target

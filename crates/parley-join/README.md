@@ -85,6 +85,43 @@ Chromium profiles, each with `--use-file-for-fake-audio-capture`).
 Build and test with `blaze` (`blaze test -p parley-join`). `scripts/p0-exit.sh` uses cargo only, because blaze cannot build `p0_exit`.
 Run the page state tests with `node --test crates/parley-join/page/inject.test.cjs`.
 
+## Daily canary
+
+`scripts/canary.sh` runs the exit check (`join,chat,tile,outsider`) on the attached Chromium and appends one `PASS` or `FAIL` line per run to `~/.local/state/parley/canary.log`.
+A `FAIL` runs `PARLEY_CANARY_ALERT_CMD` with that line as its only argument, then the script exits 1.
+A lost session is a `FAIL` line. The script never signs in. The speakers check does not run.
+
+Install on the host where the signed-in, headed Chromium runs with `--remote-debugging-port=9523`:
+
+```sh
+cargo build --release -p parley-join --bin p0_exit
+mkdir -p ~/.config/parley ~/.config/systemd/user
+sed "s|@REPO@|$PWD|" deploy/systemd/parley-canary.service > ~/.config/systemd/user/parley-canary.service
+cp deploy/systemd/parley-canary.timer ~/.config/systemd/user/
+```
+
+Write `~/.config/parley/canary.env` outside the repository, mode `0600`:
+
+```sh
+PARLEY_CANARY_LINK=https://meet.google.com/abc-defg-hij
+PARLEY_CANARY_HOST_AUTHUSER=1
+PARLEY_CANARY_BOT_AUTHUSER=0
+PARLEY_CANARY_ALERT_CMD=/home/you/.config/parley/canary-alert.sh
+```
+
+The alert command is an executable that takes the result line as `$1`. Optional keys: `PARLEY_CANARY_CDP_PORT` (9523), `PARLEY_CANARY_BIN` (`target/release/p0_exit`), `PARLEY_CANARY_TIMEOUT` (seconds, 1800), `PARLEY_CANARY_STATE`.
+
+Start the timer and run it once:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now parley-canary.timer
+systemctl --user start parley-canary.service
+tail -n 1 ~/.local/state/parley/canary.log
+```
+
+The timer fires at 06:00 local time. Run `loginctl enable-linger "$USER"` if the user manager must run without a login session.
+
 ## Phase 0 findings
 
 See the [Phase 0 run results](../../docs/phase0/join.md).
