@@ -210,6 +210,35 @@ pub fn is_doc_request(request: &str) -> bool {
     )
 }
 
+/// A spoken call control that follows the wake name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoiceCommand {
+    Pause,
+    Resume,
+    Leave,
+}
+
+/// The call control in `request` ("pause", "resume the notes", "leave the call"), else `None`.
+/// The control word is the first word after "please" or "can you", and the request is short, so
+/// "leave out the budget in the recap" is a question. A keyword match, no model call.
+pub fn voice_command(request: &str) -> Option<VoiceCommand> {
+    let r = request.to_lowercase();
+    let words: Vec<&str> = r
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .skip_while(|w| matches!(*w, "please" | "can" | "could" | "would" | "you"))
+        .collect();
+    if words.len() > 4 {
+        return None;
+    }
+    match *words.first()? {
+        "pause" => Some(VoiceCommand::Pause),
+        "resume" => Some(VoiceCommand::Resume),
+        "leave" => Some(VoiceCommand::Leave),
+        _ => None,
+    }
+}
+
 fn take_chars(s: &str, n: usize) -> &str {
     &s[..s.char_indices().nth(n).map_or(s.len(), |(i, _)| i)]
 }
@@ -270,12 +299,37 @@ fn notes_tool() -> ToolDef {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionItem, Notes, find_request, format_recap, is_doc_request, is_recap_request};
+    use super::{
+        ActionItem, Notes, VoiceCommand, find_request, format_recap, is_doc_request,
+        is_recap_request, voice_command,
+    };
 
     fn item(text: &str, owner: Option<&str>) -> ActionItem {
         ActionItem {
             text: text.into(),
             owner: owner.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn classifies_voice_commands() {
+        for (q, want) in [
+            ("pause", VoiceCommand::Pause),
+            ("Pause the notes.", VoiceCommand::Pause),
+            ("please resume", VoiceCommand::Resume),
+            ("resume taking notes", VoiceCommand::Resume),
+            ("can you leave the call", VoiceCommand::Leave),
+            ("Leave.", VoiceCommand::Leave),
+        ] {
+            assert_eq!(voice_command(q), Some(want), "{q}");
+        }
+        for q in [
+            "leave out the budget in the recap",
+            "who will leave early on Friday?",
+            "what did we decide?",
+            "recap",
+        ] {
+            assert_eq!(voice_command(q), None, "{q}");
         }
     }
 

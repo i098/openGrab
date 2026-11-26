@@ -128,10 +128,13 @@ registerProcessor("parley-pcm",P)`;
   const tap = async (track, stream) => {
     const id = ++trackSeq;
     sendJson({ t: "track", id, label: track.label, stream: stream.id });
-    // A remote WebRTC stream only delivers samples while a media element plays it.
+    // A remote WebRTC stream only delivers samples while a media element plays it. The element stays in the
+    // document, or the browser may collect it and stop the stream.
     const el = new Audio();
     el.srcObject = stream;
     el.autoplay = true;
+    el.hidden = true;
+    document.body.append(el);
     el.play().catch(() => {});
     const ctx = new AudioContext({ sampleRate: 16000 });
     await ctx.resume();

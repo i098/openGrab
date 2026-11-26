@@ -1,12 +1,14 @@
 //! Live check of the `parley` binary on a real Meet call. One PASS or FAIL line per check.
 //!
-//! `live_check <meet-link> --attach 9523 --host-authuser 0 --bot-authuser 1 --say speech.wav`
+//! `live_check <meet-link> --attach 9523 --host-authuser 0 --bot-authuser 1 --say speech.wav --voice-dir voice`
 //!
 //! It needs a headed Chromium with two signed-in accounts (the setup of `p0_exit --host-authuser`).
 //! The host account is a tab this program opens; the bot account is the tab that `parley` opens.
 //! The program starts `parley`, admits it, reads the notice in the Meet chat, opens the meeting page in
 //! a new window, plays `speech.wav` into the host microphone, asks a question and a doc request in the
-//! Meet chat, clicks Remove on the page, and checks that `parley` leaves. It closes every tab it opened.
+//! Meet chat, then speaks a request, "pause", "resume" and "leave" (the WAV files in `--voice-dir`) and checks the
+//! chat answer, the page state, the bot tile and that `parley` leaves. It prints how long the chat answer took
+//! for the spoken request and for the chat request. It closes every tab it opened.
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -15,6 +17,7 @@ use parley_join::protocol::{CallEvent, PageMsg};
 use parley_join::{Browser, Opts, Outcome, Role, Session, with_authuser};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -30,6 +33,13 @@ struct Args {
     /// A WAV file with speech, played into the host microphone (16 kHz mono 16-bit is fine).
     #[arg(long)]
     say: PathBuf,
+    /// Spoken requests as WAV files: `request.wav` ("<wake>, when is the launch?"), `pause.wav`, `resume.wav`
+    /// and `leave.wav` (each "<wake>, pause", ...). Played into the host microphone like `--say`.
+    #[arg(long)]
+    voice_dir: PathBuf,
+    /// Save a screenshot of the host's Meet window here after pause and after resume (the bot tile is in it).
+    #[arg(long)]
+    shots: Option<PathBuf>,
     /// The `parley` binary (default: next to this program).
     #[arg(long)]
     parley: Option<PathBuf>,
@@ -118,19 +128,6 @@ impl PageTab {
             .unwrap_or_default()
     }
 
-    /// Click an element of the meeting page (our own page, so a script click is a real one).
-    /// Click a button that asks `confirm()`: a dialog would block every page command, so the page answers yes itself.
-    async fn click_and_confirm(&self, selector: &str) -> Result<()> {
-        self.eval("window.confirm = () => true").await?;
-        self.click(selector).await
-    }
-
-    async fn click(&self, selector: &str) -> Result<()> {
-        let js = format!("document.querySelector({}).click()", Value::from(selector));
-        self.eval(&js).await?;
-        Ok(())
-    }
-
     async fn close(self) {
         let _ = self
             .cdp
@@ -160,6 +157,19 @@ async fn wait_chat(host: &mut Session, secs: u64, want: impl Fn(&str) -> bool) -
     None
 }
 
+/// Play a WAV into the host microphone. Returns when the speech ends.
+async fn speak(host: &Session, wav: &[u8]) -> Result<Instant> {
+    let started = Instant::now();
+    Ok(started + Duration::from_secs_f64(host.say(wav).await?))
+}
+
+async fn shot(host: &Session, dir: &Option<PathBuf>, name: &str) {
+    if let Some(dir) = dir {
+        let saved = host.screenshot(&dir.join(format!("{name}.png"))).await;
+        println!("host screenshot {name}: {saved:?}");
+    }
+}
+
 async fn poll<F: Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
     let end = Instant::now() + Duration::from_secs(secs);
     while Instant::now() < end {
@@ -175,6 +185,15 @@ async fn poll<F: Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> 
 async fn main() -> Result<()> {
     let a = Args::parse();
     let wav = std::fs::read(&a.say).context("reading --say")?;
+    let voice = |name: &str| {
+        std::fs::read(a.voice_dir.join(name)).with_context(|| format!("reading {name}"))
+    };
+    let (say_request, say_pause, say_resume, say_leave) = (
+        voice("request.wav")?,
+        voice("pause.wav")?,
+        voice("resume.wav")?,
+        voice("leave.wav")?,
+    );
     let parley = match &a.parley {
         Some(p) => p.clone(),
         None => std::env::current_exe()?.with_file_name("parley"),
@@ -236,6 +255,15 @@ async fn main() -> Result<()> {
         }
     }
     let page_url = page_url.context("parley printed no page link")?;
+    let printed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = printed.clone();
+    tokio::spawn(async move {
+        while let Ok(Some(l)) = out.next_line().await {
+            println!("parley: {l}");
+            sink.lock().unwrap().push(l);
+        }
+    });
+    let printed_line = |want: &str| printed.lock().unwrap().iter().any(|l| l == want);
     ok &= verdict(joined, "join", "the bot reached the call");
 
     let notice = wait_chat(&mut host, 120, |t| t.contains(&page_url)).await;
@@ -279,10 +307,10 @@ async fn main() -> Result<()> {
         "transcript",
         format!("page lines: {}", lines.replace('\n', " | ")),
     );
-    host.set_mic(false).await?;
 
     let name = &a.wake;
     host.post_chat(&format!("{name}, {}", a.question)).await?;
+    let asked = Instant::now();
     let notice_text = notice.clone().unwrap_or_default();
     let mine = format!("{name}, {}", a.question);
     let answer = wait_chat(&mut host, a.answer_timeout, |t| {
@@ -294,7 +322,11 @@ async fn main() -> Result<()> {
             .as_deref()
             .is_some_and(|t| t != parley_brain::REQUEST_FAILED && mentions(t, &a.keyword)),
         "answer",
-        format!("chat answer: {}", answer.as_deref().unwrap_or("none")),
+        format!(
+            "chat answer after {:.1} s: {}",
+            asked.elapsed().as_secs_f64(),
+            answer.as_deref().unwrap_or("none")
+        ),
     );
 
     let before = page.text("#doc").await;
@@ -319,8 +351,64 @@ async fn main() -> Result<()> {
         ),
     );
 
-    page.click_and_confirm("#remove").await?;
-    let bye = wait_chat(&mut host, 60, |t| mentions(t, "left the call")).await;
+    let seen: Vec<String> = [
+        Some(notice_text.clone()),
+        Some(mine),
+        Some(request),
+        answer,
+        reply,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let new_chat = |t: &str| !seen.iter().any(|s| s == t);
+
+    let ends = speak(&host, &say_request).await?;
+    let spoken = wait_chat(&mut host, a.answer_timeout, new_chat).await;
+    let took = Instant::now().saturating_duration_since(ends).as_secs_f64();
+    ok &= verdict(
+        spoken
+            .as_deref()
+            .is_some_and(|t| t != parley_brain::REQUEST_FAILED && mentions(t, &a.keyword)),
+        "spoken request",
+        format!(
+            "chat answer {took:.1} s after the end of speech: {}",
+            spoken.as_deref().unwrap_or("none")
+        ),
+    );
+
+    speak(&host, &say_pause).await?;
+    let paused = poll(120, || async {
+        page.text("#status").await.trim() == "Paused" && printed_line("tile: paused")
+    })
+    .await;
+    ok &= verdict(
+        paused,
+        "spoken pause",
+        format!(
+            "page status: {}; bot tile paused",
+            page.text("#status").await.trim()
+        ),
+    );
+    shot(&host, &a.shots, "paused").await;
+
+    speak(&host, &say_resume).await?;
+    let resumed = poll(120, || async {
+        page.text("#status").await.trim() == "Live" && printed_line("tile: listening")
+    })
+    .await;
+    ok &= verdict(
+        resumed,
+        "spoken resume",
+        format!(
+            "page status: {}; bot tile listening",
+            page.text("#status").await.trim()
+        ),
+    );
+    shot(&host, &a.shots, "listening").await;
+
+    speak(&host, &say_leave).await?;
+    let bye = wait_chat(&mut host, 120, |t| mentions(t, "left the call")).await;
     ok &= verdict(
         bye.is_some(),
         "goodbye",
@@ -329,11 +417,11 @@ async fn main() -> Result<()> {
     let left = tokio::time::timeout(Duration::from_secs(90), child.wait()).await;
     ok &= verdict(
         matches!(&left, Ok(Ok(s)) if s.success()),
-        "remove",
-        format!("Remove clicked on the page; parley exit: {left:?}"),
+        "spoken leave",
+        format!("parley exit: {left:?}"),
     );
     let ended = page.text("#ended").await;
-    println!("page after remove: {}", ended.trim());
+    println!("page after leave: {}", ended.trim());
 
     page.close().await;
     host.leave().await?;

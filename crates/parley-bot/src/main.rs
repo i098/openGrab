@@ -3,11 +3,16 @@
 //! The bot joins through the signed-in Chromium on the debugging port, serves the meeting page, and posts the page
 //! link in the Meet chat. Call audio goes through `parley-stt` and each transcript line goes to the page.
 //! A Meet chat line that starts with the wake name is a request: `parley-brain` answers it in the chat, or writes
-//! the live doc. Pause, resume and remove on the page stop and start the transcript; remove makes the bot leave.
+//! the live doc. A transcript segment that starts with the wake name is the same request, and "<wake>, pause",
+//! "resume" and "leave" are spoken call controls. Pause, resume and remove on the page stop and start the
+//! transcript; remove makes the bot leave.
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, ValueEnum};
-use parley_brain::{DEFAULT_NAME, Transcript, find_request, is_doc_request, is_recap_request};
+use parley_brain::{
+    DEFAULT_NAME, Transcript, VoiceCommand, find_request, is_doc_request, is_recap_request,
+    voice_command,
+};
 use parley_join::analysis::rms;
 use parley_join::protocol::{CallEvent, PageMsg};
 use parley_join::{Browser, Opts, Outcome, Role, Session, with_authuser};
@@ -186,6 +191,27 @@ async fn handle_request(ctx: Arc<Ctx>, text: String) {
     let _ = ctx.out.send(line);
 }
 
+/// A request from the call, spoken (`spoken`) or typed in the chat. Chat requests need a running session.
+/// A spoken request also may be a call control: while paused only resume counts, and pause, resume and leave
+/// go through the same meeting state as the buttons on the page, which the main loop shows on the tile.
+fn dispatch(ctx: &Arc<Ctx>, text: String, spoken: bool) {
+    let Some(q) = find_request(&text, &ctx.wake) else {
+        return;
+    };
+    let state = ctx.meeting.state();
+    if spoken && let Some(c) = voice_command(q) {
+        match (c, state) {
+            (VoiceCommand::Pause, SessionState::Running) => ctx.meeting.pause(),
+            (VoiceCommand::Resume, SessionState::Paused) => ctx.meeting.resume(),
+            (VoiceCommand::Leave, SessionState::Running) => ctx.meeting.remove(),
+            _ => return,
+        };
+        println!("spoken command: {c:?}");
+    } else if state == SessionState::Running {
+        tokio::spawn(handle_request(ctx.clone(), text));
+    }
+}
+
 fn model_paths(a: &Args) -> Result<(Engine, PathBuf, PathBuf)> {
     let data = match &a.data {
         Some(d) => d.clone(),
@@ -311,7 +337,16 @@ async fn run(
                 eprintln!("a chat line did not show in the call");
             }
         }
+        let state = meeting.state();
         while let Ok(text) = texts.try_recv() {
+            // The speech models keep running while paused, so that "<wake>, resume" is heard. Nothing else is kept.
+            if find_request(&text, &a.wake).is_some() {
+                dispatch(&ctx, text, true);
+                continue;
+            }
+            if state != SessionState::Running {
+                continue;
+            }
             let line = Line {
                 speaker: speaking.name(),
                 text,
@@ -322,7 +357,6 @@ async fn run(
                 eprintln!("transcript line from {who}");
             }
         }
-        let state = meeting.state();
         if state != shown {
             shown = state;
             match state {
@@ -333,8 +367,14 @@ async fn run(
                         .await;
                     return Ok(());
                 }
-                SessionState::Paused => bot.set_tile("paused").await?,
-                SessionState::Running => bot.set_tile("listening").await?,
+                SessionState::Paused => {
+                    bot.set_tile("paused").await?;
+                    println!("tile: paused");
+                }
+                SessionState::Running => {
+                    bot.set_tile("listening").await?;
+                    println!("tile: listening");
+                }
             }
         }
         let event = tokio::select! {
@@ -351,17 +391,13 @@ async fn run(
             (frames, peak, report) = (0, 0.0, Instant::now());
         }
         match event {
-            Some(CallEvent::Audio(f)) if state == SessionState::Running => {
+            Some(CallEvent::Audio(f)) => {
                 frames += 1;
                 peak = peak.max(rms(&f.pcm));
                 let _ = audio_tx.send((f.track, f.pcm));
             }
             Some(CallEvent::Page(PageMsg::Speaking { names, .. })) => speaking.seen(names),
-            Some(CallEvent::Page(PageMsg::Chat { text, .. }))
-                if state == SessionState::Running && find_request(&text, &a.wake).is_some() =>
-            {
-                tokio::spawn(handle_request(ctx.clone(), text));
-            }
+            Some(CallEvent::Page(PageMsg::Chat { text, .. })) => dispatch(&ctx, text, false),
             Some(CallEvent::Page(PageMsg::Log { msg })) => eprintln!("page: {msg}"),
             Some(CallEvent::Page(PageMsg::Track { .. })) => eprintln!("audio track found"),
             _ => {}
@@ -372,6 +408,30 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn spoken_controls_follow_the_state_and_paused_requests_are_ignored() {
+        let (out, mut out_rx) = mpsc::unbounded_channel();
+        let ctx = Arc::new(Ctx {
+            meeting: Meeting::new("secret".into()),
+            wake: "Parley".into(),
+            page_url: String::new(),
+            out,
+            turn: tokio::sync::Mutex::new(()),
+        });
+        let say = |t: &str| dispatch(&ctx, t.into(), true);
+        say("Parley, pause.");
+        assert_eq!(ctx.meeting.state(), SessionState::Paused);
+        say("Parley, leave the call"); // only resume counts while paused
+        say("Parley, what did we decide?"); // would send a chat line if it started a request
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(ctx.meeting.state(), SessionState::Paused);
+        assert!(out_rx.try_recv().is_err());
+        say("hey parley, resume");
+        assert_eq!(ctx.meeting.state(), SessionState::Running);
+        say("Parley, leave");
+        assert_eq!(ctx.meeting.state(), SessionState::Removed);
+    }
 
     #[test]
     fn speaker_is_named_only_when_one_person_spoke_recently() {
