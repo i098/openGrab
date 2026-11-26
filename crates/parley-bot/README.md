@@ -54,14 +54,14 @@ The model comes from `PARLEY_LLM` (`openai` or `anthropic`) and the `parley-llm`
 ## Live check
 
 `live_check` runs the whole product on a real call with two signed-in accounts in one browser (the setup of `p0_exit --host-authuser`).
-It opens the host tab, starts `parley`, admits it, and prints one `PASS` or `FAIL` line each for the notice, a transcript line from audio, a chat answer, a live doc change in an open page tab, a spoken request, spoken pause, spoken resume and spoken leave (page state, bot tile, goodbye line, exit status). It prints how long the chat answer took after the end of speech for the spoken request and after the chat post for the chat request (each within about 1 s: it polls the chat). The page Remove button is not part of this run.
+It opens the host tab, starts `parley`, admits it, and prints one `PASS` or `FAIL` line each for the notice, a transcript line from audio, a chat answer, a live doc change in an open page tab, a spoken request, a spoken recap, spoken pause, spoken resume and spoken leave (page state, bot tile, goodbye line, exit status). It prints how long the chat answer took after the end of speech for the spoken request and the spoken recap, and after the chat post for the chat request (each within about 1 s: it polls the chat). The page Remove button is not part of this run.
 The host plays a recorded WAV into the call: attach mode has no fake microphone, so the page script plays the file into the host's silent microphone track.
 
 ```sh
 espeak-ng -w /tmp/say.raw.wav "The launch is on the first of March. Tom will send the budget deck by Friday."
 ffmpeg -y -i /tmp/say.raw.wav -ar 16000 -ac 1 -c:a pcm_s16le /tmp/say.wav
 mkdir -p /tmp/voice
-for f in "request:Parley, when is the launch?" "pause:Parley, pause." "resume:Parley, resume." "leave:Parley, leave the call."; do
+for f in "request:Parley, when is the launch?" "recap:Parley, recap." "pause:Parley, pause." "resume:Parley, resume." "leave:Parley, leave the call."; do
   espeak-ng -w /tmp/voice/raw.wav "${f#*:}" && ffmpeg -y -i /tmp/voice/raw.wav -ar 16000 -ac 1 -c:a pcm_s16le "/tmp/voice/${f%%:*}.wav"
 done
 cargo build --release -p parley-bot

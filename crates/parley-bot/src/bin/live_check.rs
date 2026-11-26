@@ -33,8 +33,8 @@ struct Args {
     /// A WAV file with speech, played into the host microphone (16 kHz mono 16-bit is fine).
     #[arg(long)]
     say: PathBuf,
-    /// Spoken requests as WAV files: `request.wav` ("<wake>, when is the launch?"), `pause.wav`, `resume.wav`
-    /// and `leave.wav` (each "<wake>, pause", ...). Played into the host microphone like `--say`.
+    /// Spoken requests as WAV files: `request.wav` ("<wake>, when is the launch?"), `recap.wav` ("<wake>, recap"),
+    /// `pause.wav`, `resume.wav` and `leave.wav` (each "<wake>, pause", ...). Played into the host microphone like `--say`.
     #[arg(long)]
     voice_dir: PathBuf,
     /// Save a screenshot of the host's Meet window here after pause and after resume (the bot tile is in it).
@@ -188,8 +188,9 @@ async fn main() -> Result<()> {
     let voice = |name: &str| {
         std::fs::read(a.voice_dir.join(name)).with_context(|| format!("reading {name}"))
     };
-    let (say_request, say_pause, say_resume, say_leave) = (
+    let (say_request, say_recap, say_pause, say_resume, say_leave) = (
         voice("request.wav")?,
+        voice("recap.wav")?,
         voice("pause.wav")?,
         voice("resume.wav")?,
         voice("leave.wav")?,
@@ -374,6 +375,18 @@ async fn main() -> Result<()> {
         format!(
             "chat answer {took:.1} s after the end of speech: {}",
             spoken.as_deref().unwrap_or("none")
+        ),
+    );
+
+    let ends = speak(&host, &say_recap).await?;
+    let recap = wait_chat(&mut host, a.answer_timeout, |t| t.starts_with("Recap")).await;
+    let took = Instant::now().saturating_duration_since(ends).as_secs_f64();
+    ok &= verdict(
+        recap.as_deref().is_some_and(|t| t.contains(&a.keyword)),
+        "spoken recap",
+        format!(
+            "chat recap {took:.1} s after the end of speech: {}",
+            recap.as_deref().unwrap_or("none")
         ),
     );
 
