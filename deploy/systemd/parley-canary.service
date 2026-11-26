@@ -6,6 +6,6 @@ Documentation=https://github.com/i098/openGrab/blob/main/crates/parley-join/READ
 Type=oneshot
 # Settings live outside the repository. See "Daily canary" in crates/parley-join/README.md.
 EnvironmentFile=%h/.config/parley/canary.env
-# @REPO@ is the absolute path of the checkout. The install step replaces it with sed.
-ExecStart=@REPO@/scripts/canary.sh
+# The unit runs the copy in ~/.local/share/parley/canary/. Copy scripts/canary.sh and p0_exit there first.
+ExecStart=%h/.local/share/parley/canary/canary.sh
 TimeoutStartSec=2h
