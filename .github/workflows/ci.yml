@@ -44,3 +44,6 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked
+
+      - name: Canary script
+        run: bash scripts/canary-test.sh

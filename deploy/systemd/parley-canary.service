@@ -1,0 +1,11 @@
+[Unit]
+Description=openGrab daily Meet canary (Phase 0 exit check on the attached Chromium)
+Documentation=https://github.com/i098/openGrab/blob/main/crates/parley-join/README.md
+
+[Service]
+Type=oneshot
+# Settings live outside the repository. See "Daily canary" in crates/parley-join/README.md.
+EnvironmentFile=%h/.config/parley/canary.env
+# @REPO@ is the absolute path of the checkout. The install step replaces it with sed.
+ExecStart=@REPO@/scripts/canary.sh
+TimeoutStartSec=2h
