@@ -443,7 +443,13 @@ async fn main() -> Result<()> {
         let (mut bot_read, mut host_read, mut log) = (0u32, 0u32, String::new());
         for n in 1..=a.chat_count {
             let line = format!("host line {n}/{}", a.chat_count);
-            let posted = h.post_chat(&line).await.unwrap_or(false);
+            let posted = match h.post_chat(&line).await {
+                Ok(sent) => sent,
+                Err(e) => {
+                    eprintln!("host line {n}: post_chat error: {e:#}");
+                    false
+                }
+            };
             let got = wait_chat(&mut bot, &mut col, &line, a.chat_timeout.min(30)).await;
             bot_read += u32::from(got);
             let reply = format!("bot line {n}/{}", a.chat_count);
@@ -493,7 +499,13 @@ async fn main() -> Result<()> {
                 a.chat_count,
                 text.chars().take(50).collect::<String>()
             );
-            let ok = bot.post_chat(&reply).await.unwrap_or(false);
+            let ok = match bot.post_chat(&reply).await {
+                Ok(sent) => sent,
+                Err(e) => {
+                    eprintln!("ack {read}: post_chat error: {e:#}");
+                    false
+                }
+            };
             landed += u32::from(ok);
             log += &format!(
                 "{}\n",
