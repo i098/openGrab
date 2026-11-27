@@ -435,7 +435,7 @@ async fn main() -> Result<()> {
         verdict(
             false,
             "chat",
-            format!("the chat panel did not open: {e:#}"),
+            format!("the chat panel did not open: {}", post_error_kind(e)),
             &mut results,
         );
     }
@@ -446,7 +446,7 @@ async fn main() -> Result<()> {
             let posted = match h.post_chat(&line).await {
                 Ok(sent) => sent,
                 Err(e) => {
-                    eprintln!("host line {n}: post_chat error: {e:#}");
+                    eprintln!("host line {n}: post_chat failed: {}", post_error_kind(&e));
                     false
                 }
             };
@@ -457,7 +457,7 @@ async fn main() -> Result<()> {
                 && match bot.post_chat(&reply).await {
                     Ok(sent) => sent,
                     Err(e) => {
-                        eprintln!("bot reply {n}: post_chat error: {e:#}");
+                        eprintln!("bot reply {n}: post_chat failed: {}", post_error_kind(&e));
                         false
                     }
                 };
@@ -502,7 +502,7 @@ async fn main() -> Result<()> {
             let ok = match bot.post_chat(&reply).await {
                 Ok(sent) => sent,
                 Err(e) => {
-                    eprintln!("ack {read}: post_chat error: {e:#}");
+                    eprintln!("ack {read}: post_chat failed: {}", post_error_kind(&e));
                     false
                 }
             };
@@ -534,6 +534,22 @@ async fn main() -> Result<()> {
         bail!("a check failed");
     }
     Ok(())
+}
+
+/// Maps a post_chat error to a fixed label. Error text can carry page or meeting data, so it is never printed.
+fn post_error_kind(e: &anyhow::Error) -> &'static str {
+    let s = e.to_string();
+    if s.starts_with("page script threw") {
+        "page script error"
+    } else if s.contains(" control on the page") {
+        "control not found"
+    } else if s.contains("no reply in") {
+        "browser timeout"
+    } else if s.contains("connection") {
+        "browser connection"
+    } else {
+        "other error"
+    }
 }
 
 /// Wait up to `secs` for the chat line `text` to arrive in `s`.
