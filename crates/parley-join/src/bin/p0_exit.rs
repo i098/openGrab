@@ -447,7 +447,14 @@ async fn main() -> Result<()> {
             let got = wait_chat(&mut bot, &mut col, &line, a.chat_timeout.min(30)).await;
             bot_read += u32::from(got);
             let reply = format!("bot line {n}/{}", a.chat_count);
-            let replied = got && bot.post_chat(&reply).await.unwrap_or(false);
+            let replied = got
+                && match bot.post_chat(&reply).await {
+                    Ok(sent) => sent,
+                    Err(e) => {
+                        eprintln!("bot reply {n}: post_chat error: {e:#}");
+                        false
+                    }
+                };
             let back = replied && wait_chat(h, &mut hcol, &reply, a.chat_timeout.min(30)).await;
             host_read += u32::from(back);
             eprintln!(
